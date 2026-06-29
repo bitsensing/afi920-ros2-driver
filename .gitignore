@@ -1,0 +1,42 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# Compiled Python bytecode
+*.py[cod]
+__pycache__/
+
+# C/C++ build artifacts
+*.o
+*.a
+*.so
+*.dylib
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+TEST*.xml
+
+# Colcon
+.colcon/
+
+logs/
+
+# Internal development
+.dev/
+.omc/
+.gitignore
+docs/superpowers/*

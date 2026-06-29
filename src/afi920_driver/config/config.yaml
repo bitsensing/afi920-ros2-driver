@@ -1,0 +1,44 @@
+# =============================================================================
+# AFI920 ROS2 Driver Configuration
+# =============================================================================
+# Usage:
+#   ros2 launch afi920_driver afi920.launch.py config_file:=$(ros2 pkg prefix afi920_driver)/share/afi920_driver/config/config.yaml
+#   ros2 launch afi920_driver afi920.launch.py config_file:=/absolute/path/to/config.yaml
+# =============================================================================
+
+afi920_driver:
+  ros__parameters:
+    # --- Sensor Connection ---
+    sensor_ip: "192.168.10.150"
+    data_port: 30509              # RDI data port (TCP/UDP per transport_mode)
+    shi_port: 30510               # SHII data port (TCP/UDP per transport_mode)
+    spi_port: 30511               # SPI data port (TCP/UDP per transport_mode)
+    frame_id: "afi920"            # TF frame ID
+
+    # --- Filtering (runtime-adjustable via ros2 param set) ---
+    min_range: 0.0                # Minimum range filter (meters)
+    max_range: 300.0              # Maximum range filter (meters)
+    min_snr: 0.0                  # Minimum SNR filter (dB)
+    min_existence_probability: 0.0  # Minimum existence probability (0-100)
+
+    # --- Publishing ---
+    publish_detections: true      # Publish ~/RDI DetectionArray
+    publish_health: true          # Publish ~/SHI HealthInfo
+    publish_performance: true     # Publish ~/SPI SensorPerformance
+    transport_mode: "tcp"         # Data stream transport: "tcp" or "udp"
+    validate_e2e: true            # Validate AUTOSAR E2E CRC on RDI/SHII/SPI
+    e2e_strict: false             # Drop E2E CRC/metadata mismatches when true
+
+# =============================================================================
+# Multi-Sensor Configuration
+# =============================================================================
+# For multi-sensor setups, use multi_sensor.yaml or create a config per sensor:
+#
+#   ros2 launch afi920_driver multi_sensor.launch.py
+#
+# Or per-sensor config files:
+#
+#   afi920_driver:
+#     ros__parameters:
+#       sensor_ip: "192.168.10.151"
+#       frame_id: "radar_front"

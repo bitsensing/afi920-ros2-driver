@@ -1,0 +1,17 @@
+afi920_driver:
+  ros__parameters:
+    sensor_ip: "192.168.10.150"
+    data_port: 30509
+    shi_port: 30510
+    spi_port: 30511
+    frame_id: "afi920"
+    min_range: 0.0
+    max_range: 300.0
+    min_snr: 0.0
+    min_existence_probability: 0.0
+    publish_detections: true
+    publish_health: true
+    publish_performance: true
+    transport_mode: "tcp"
+    validate_e2e: true
+    e2e_strict: false

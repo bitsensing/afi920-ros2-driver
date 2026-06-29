@@ -1,0 +1,47 @@
+# Multi-sensor configuration example
+# Each sensor gets its own namespace and parameters
+# Result: /radar_front/PointCloud2, /radar_front/RDI, /radar_front/SHI, /radar_front/SPI, ...
+
+radar_front:
+  afi920_driver:
+    ros__parameters:
+      sensor_ip: "192.168.10.150"
+      frame_id: "radar_front"
+      publish_detections: true
+      publish_health: true
+      publish_performance: true
+      validate_e2e: true
+      e2e_strict: false
+
+radar_rear:
+  afi920_driver:
+    ros__parameters:
+      sensor_ip: "192.168.10.151"
+      frame_id: "radar_rear"
+      publish_detections: true
+      publish_health: true
+      publish_performance: true
+      validate_e2e: true
+      e2e_strict: false
+
+radar_left:
+  afi920_driver:
+    ros__parameters:
+      sensor_ip: "192.168.10.152"
+      frame_id: "radar_left"
+      publish_detections: true
+      publish_health: true
+      publish_performance: true
+      validate_e2e: true
+      e2e_strict: false
+
+radar_right:
+  afi920_driver:
+    ros__parameters:
+      sensor_ip: "192.168.10.153"
+      frame_id: "radar_right"
+      publish_detections: true
+      publish_health: true
+      publish_performance: true
+      validate_e2e: true
+      e2e_strict: false
