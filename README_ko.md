@@ -16,6 +16,7 @@ AFI920 센서 데이터를 ROS 2 토픽으로 발행하여 고객 환경의 ROS 
 - 이 저장소는 **AFI920 고객의 ROS 2 통합용 공개 드라이버**를 제공합니다.
 - **제품 매뉴얼, 인터페이스 명세, 설치/운영 상세 가이드**는 별도 제공 문서에서 확인할 수 있습니다.
 - 이 README는 **빌드, 실행, 주요 토픽/파라미터, 기본 시각화 흐름**을 빠르게 확인할 수 있도록 구성되어 있습니다.
+- 전체 파라미터, 메시지 정의, 프로토콜 세부는 통합 참조 문서 [AFI920_ROS2_GUIDE_ko.md](AFI920_ROS2_GUIDE_ko.md)에서 확인한다.
 
 ---
 
@@ -122,7 +123,10 @@ sudo apt install ros-$ROS_DISTRO-rclcpp \
                   ros-$ROS_DISTRO-rclcpp-components \
                   ros-$ROS_DISTRO-sensor-msgs \
                   ros-$ROS_DISTRO-std-msgs \
-                  ros-$ROS_DISTRO-visualization-msgs
+                  ros-$ROS_DISTRO-visualization-msgs \
+                  ros-$ROS_DISTRO-geometry-msgs \
+                  ros-$ROS_DISTRO-tf2 \
+                  ros-$ROS_DISTRO-tf2-ros
 ```
 
 ### 네트워크 설정
@@ -165,6 +169,9 @@ sudo ip addr add 192.168.10.100/24 dev eth0
 | `RDI` | `afi920_msgs/DetectionArray` | 10 Hz | 전체 Detection 데이터 |
 | `SHI` | `afi920_msgs/HealthInfo` | 10 Hz | 센서 상태 및 건강 정보 |
 | `SPI` | `afi920_msgs/SensorPerformance` | 10 Hz | 센서 성능 및 자세 정보 |
+| `E2E` | `afi920_msgs/E2eStatus` | 30 Hz | RDI/SHI/SPI 메시지별 E2E 판정 결과. `header.stamp`는 대응 데이터 메시지의 stamp와 같다 |
+
+`publish_tf`가 `true`(기본값)이면 드라이버는 SPI 메시지마다 수신한 센서 장착 자세를 `/tf`에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 송출한다. `publish_performance`가 `false`이면 자세를 송출하지 않는다.
 
 ## PointCloud2 Fields
 
@@ -206,6 +213,8 @@ PointCloud2의 Cartesian 좌표 `(x, y, z)`는 sensor frame 기준 **FLU** `(X f
 |-----------|------|---------|---------|------|
 | `sensor_ip` | string | `192.168.10.150` | No | 센서 IP 주소 |
 | `frame_id` | string | `afi920` | Yes | 메시지에 적용할 TF frame ID |
+| `parent_frame_id` | string | `base_link` | No | 센서 자세 TF의 부모 frame |
+| `publish_tf` | bool | `true` | No | SPI 장착 자세를 `parent_frame_id → frame_id` TF로 송출. `publish_performance`가 `true`여야 한다 |
 | `min_range` | double | `0.0` | Yes | 최소 거리 필터 (m) |
 | `max_range` | double | `300.0` | Yes | 최대 거리 필터 (m) |
 | `min_snr` | double | `0.0` | Yes | 최소 SNR 필터 (dB) |
@@ -224,8 +233,22 @@ PointCloud2의 Cartesian 좌표 `(x, y, z)`는 sensor frame 기준 **FLU** `(X f
 | `config_port` | int | `30500` | No | 센서 설정 포트 |
 | `host_ip` | string | `auto` | No | 호스트 IP 주소 (`auto` 사용 가능) |
 | `transport_mode` | string | `tcp` | No | 데이터 스트림 전송 방식 (`tcp` 또는 `udp`) |
-| `validate_e2e` | bool | `true` | Yes | RDI/SHI/SPI AUTOSAR E2E CRC 검증 |
-| `e2e_strict` | bool | `false` | Yes | E2E CRC 또는 metadata 불일치 프레임 drop |
+| `validate_e2e` | bool | `true` | Yes | RDI/SHI/SPI E2E CRC 검증. 결과는 `E2E` 토픽으로 발행하며, CRC 불일치로 프레임을 폐기하지 않는다 |
+| `e2e_strict` | bool | `false` | Yes | E2E Length 또는 Data ID 불일치 프레임 drop |
+
+### 센서 인터페이스 호환
+
+드라이버는 AFI920 인터페이스 v1.0.x와 v1.1.0 이후를 별도 파라미터 없이 지원한다. 형식은 센서가 송신한 프레임으로 판별한다.
+
+| 항목 | 인터페이스 v1.0.x | 인터페이스 v1.1.0 이후 |
+|------|------------------|-----------------------|
+| RDI/SHI/SPI E2E CRC | CRC-64/XZ | 본문 대상 IEEE 802.3 CRC-32 |
+| Config API 프레임 | SOME/IP 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON |
+| 기동 시 스트림 목적지 | `SetNetworkConfig`로 적용 | `GetNetworkConfig`로 조회. 차이는 경고로 출력하며 센서 설정을 변경하지 않는다 |
+| 메시지 손실 판정 | E2E Counter | E2E Counter |
+| `PointCloud2` 제외 프레임 | DataQualifier 1, 6 | DataQualifier 1, 6 |
+
+> 인터페이스 v1.1.0 이후에서 스트림 프로토콜, 포트, 목적지를 변경하려면 진단 모드 진입, `SetNetworkConfig`, 센서 재시작이 필요하다. 드라이버는 이 절차를 수행하지 않는다. `PointCloud2`에서 제외된 프레임도 `RDI` 토픽에는 `data_qualifier`와 함께 발행한다.
 
 런타임 변경 예시:
 
@@ -264,15 +287,21 @@ ros2 launch afi920_driver afi920.launch.py namespace:=radar_rear  sensor_ip:=192
 
 - 각 센서에 고유한 `namespace`를 사용하세요.
 - 각 센서에 고유한 `frame_id`를 사용하세요.
-- 차량 좌표계와 연결할 때는 TF를 명확히 구성하세요.
 
-### TF 연결 예시
+### TF
+
+각 노드는 SPI로 수신한 센서 장착 자세를 `parent_frame_id → frame_id` 변환으로 송출한다. `multi_sensor.launch.py`는 `parent_frame` 인자(기본 `base_link`)로 공통 부모 frame을 지정한다. RViz2 Fixed Frame을 `base_link`로 두면 4개 점군이 각 장착 위치에 표시된다.
 
 ```bash
-ros2 run tf2_ros static_transform_publisher 3.5 0.0 0.7 0 0 0 base_link radar_front
+ros2 launch afi920_driver multi_sensor.launch.py parent_frame:=base_link
 ```
 
-> **Tip:** `frame_id`와 TF child frame 이름을 동일하게 맞추면 시각화 및 후처리 구성이 단순해집니다.
+차량 URDF나 다른 노드가 센서 frame을 이미 송출하면 `publish_tf:=false`로 두고 변환을 직접 송출한다. 같은 변환을 두 송출원이 내보내면 TF가 충돌한다.
+
+```bash
+ros2 launch afi920_driver afi920.launch.py namespace:=radar_front frame_id:=radar_front publish_tf:=false
+ros2 run tf2_ros static_transform_publisher 3.5 0.0 0.7 0 0 0 base_link radar_front
+```
 
 ---
 
@@ -288,7 +317,9 @@ AFI920 Sensor
    ├─ PointCloud2
    ├─ RDI
    ├─ SHI
-   └─ SPI
+   ├─ SPI
+   ├─ E2E
+   └─ /tf (센서 자세)
           │
           ▼
    RViz2 / ROS 2 Applications
@@ -304,7 +335,13 @@ AFI920 Sensor
 
 1. `rviz2` 실행
 2. **Add** → **By topic** → `/afi920/PointCloud2` 선택
-3. **Fixed Frame**을 `afi920` 또는 사용 중인 `frame_id`로 설정
+3. **Fixed Frame**을 `afi920` 또는 사용 중인 `frame_id`로 설정. `publish_tf:=true`이면 `base_link`도 사용할 수 있으며, 점군이 장착 자세에 맞춰 표시된다
+
+패키지는 RViz2 설정 파일을 함께 설치한다. `./run.sh`는 `afi920.rviz`를, `./run.sh --multi`는 `multi_sensor.rviz`(Fixed Frame `base_link`, `/radar_<pos>/PointCloud2` 토픽 4개)를 연다.
+
+```bash
+rviz2 -d $(ros2 pkg prefix afi920_driver)/share/afi920_driver/config/multi_sensor.rviz
+```
 
 권장 시작 설정:
 
@@ -329,7 +366,10 @@ AFI920 Sensor
 | PointCloud2 데이터가 0개 | 필터 설정이 너무 엄격함 | `min_range`, `min_snr`, `min_existence_probability` 값을 확인하세요 |
 | 빌드 또는 launch 실패 | ROS 2 환경 또는 의존성 문제 | `source /opt/ros/$ROS_DISTRO/setup.bash` 후 `rosdep install`을 다시 실행하세요 |
 | 패킷 손실 또는 데이터 끊김 | 네트워크 버퍼 또는 NIC 환경 문제 | NIC 설정과 시스템 수신 버퍼를 점검하세요 |
+| `Sensor stream config differs from driver parameters` 경고 | 센서(인터페이스 v1.1.0 이후)의 스트림 프로토콜 또는 포트가 다름 | `transport_mode`와 포트 파라미터를 센서 설정에 맞추거나, 센서를 재설정한 뒤 재시작한다 |
 | 멀티센서 토픽이 섞임 | namespace 또는 frame_id 중복 | 센서별로 고유한 `namespace`, `frame_id`를 사용하세요 |
+| Fixed Frame `base_link`에서 점군이 표시되지 않음 | `base_link`에서 센서 frame으로 가는 TF가 없음 | `publish_tf`와 `publish_performance`를 `true`로 유지하거나 변환을 직접 송출한다 |
+| 센서 frame이 두 자세 사이를 오감 | 드라이버와 다른 노드가 같은 변환을 송출함 | 드라이버에 `publish_tf:=false`를 지정한다 |
 
 ---
 

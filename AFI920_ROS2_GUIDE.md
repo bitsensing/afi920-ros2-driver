@@ -1,7 +1,7 @@
 # AFI920 ROS 2 Driver — AI Integration Guide
 
 > **Who this is for:** AI agents, LLM-driven automation, and developers who need the fastest path to integrating the bitsensing AFI920 4D imaging radar into a ROS 2 system.  
-> **Driver version:** 2.1.0 · **Supported ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04) · **Arch:** x86_64, aarch64  
+> **Driver version:** 2.2.0 · **Supported ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04) · **Arch:** x86_64, aarch64  
 > **License:** BSD-3-Clause
 
 ---
@@ -36,9 +36,9 @@ The AFI920 ROS 2 driver wraps the AFI920 SDK into a composable ROS 2 node. It co
 | Sensor health & fault status | `~/SHI` | `afi920_msgs/HealthInfo` |
 | Sensor performance & mounting pose | `~/SPI` | `afi920_msgs/SensorPerformance` |
 
-In addition, it publishes a `~/detection_count` RViz overlay marker and broadcasts the sensor mounting pose (from SPI) as a TF transform `parent_frame_id → frame_id`. See [§6](#6-published-topics).
+In addition, it publishes a `~/detection_count` RViz overlay marker, the E2E verification result of every RDI/SHI/SPI message on `~/E2E`, and broadcasts the sensor mounting pose (from SPI) as a TF transform `parent_frame_id → frame_id`. See [§6](#6-published-topics).
 
-All data topics use `SensorDataQoS`. The driver supports TCP (default) and UDP transport, AUTOSAR E2E CRC validation, SOME/IP-TP segment reassembly, TF broadcast of the sensor pose, and runtime filter adjustment via `ros2 param set`.
+All data topics use `SensorDataQoS`. The driver supports TCP (default) and UDP transport, E2E CRC verification for sensor interface v1.0.x and v1.1.0+ (detected from received frames, no parameter), SOME/IP-TP segment reassembly, TF broadcast of the sensor pose, and runtime filter adjustment via `ros2 param set`.
 
 ---
 
@@ -57,9 +57,11 @@ afi920-ros2-driver/
 │   │       ├── SensorPose.msg      ← mounting position & orientation
 │   │       ├── FovSegment.msg      ← FoV blockage per angular segment
 │   │       ├── RecognisableObject.msg ← per-object-type detection range
-│   │       └── ReferenceTarget.msg ← reference target characteristics
+│   │       ├── ReferenceTarget.msg ← reference target characteristics
+│   │       └── E2eStatus.msg       ← per-message E2E verification result
 │   └── afi920_driver/
 │       ├── src/afi920_node.cpp     ← main composable node
+│       ├── config/                 ← parameter YAML, afi920.rviz, multi_sensor.rviz
 │       └── launch/
 │           ├── afi920.launch.py        ← single sensor
 │           └── multi_sensor.launch.py  ← up to 4 sensors
@@ -144,6 +146,7 @@ ros2 topic hz /afi920/PointCloud2      # expect ~10 Hz
 ros2 topic echo /afi920/RDI --once
 ros2 topic echo /afi920/SHI --once
 ros2 topic echo /afi920/SPI --once
+ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 2 = CRC-64/XZ
 ```
 
 ---
@@ -160,8 +163,13 @@ Topic names are declared as relative names (e.g. `PointCloud2`), so the namespac
 | `/afi920/SHI` | `afi920_msgs/HealthInfo` | SensorDataQoS | 10 Hz |
 | `/afi920/SPI` | `afi920_msgs/SensorPerformance` | SensorDataQoS | 10 Hz |
 | `/afi920/detection_count` | `visualization_msgs/Marker` | SensorDataQoS | 10 Hz |
+| `/afi920/E2E` | `afi920_msgs/E2eStatus` | SensorDataQoS | 30 Hz (RDI + SHI + SPI) |
 
 `detection_count` is a `TEXT_VIEW_FACING` marker (`Pts: <n>`) for RViz overlay; it is always published alongside `PointCloud2`.
+
+**DataQualifier:** RDI frames with DataQualifier 1 (not available) or 6 (resend of the previous scan) carry no new measurement. They are excluded from `PointCloud2` and `detection_count` and are still published on `RDI` with `data_qualifier` set.
+
+**E2E:** one `E2eStatus` message is published for every received RDI/SHI/SPI message, including frames dropped by `e2e_strict`. Its `header.stamp` equals the stamp of the matching `PointCloud2`/`RDI`/`SHI`/`SPI` message, so the two can be paired by exact time. See [§9](#afi920_msgse2estatus--per-message-e2e-result).
 
 **TF broadcast:** when `publish_tf` is `true` (default) and `publish_performance` is `true`, the node broadcasts the sensor mounting pose received in each SPI frame to `/tf` (`tf2_msgs/TFMessage`) as the transform `parent_frame_id → frame_id` (default `base_link → afi920`). This lets RViz/consumers place each sensor's cloud at its calibrated position when the fixed frame is set to `parent_frame_id`. If `publish_performance` is `false`, no SPI pose is available and TF is not broadcast (a warning is logged).
 
@@ -212,8 +220,8 @@ Topic names are declared as relative names (e.g. `PointCloud2`), so the namespac
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `validate_e2e` | bool | `true` | Verify AUTOSAR E2E CRC-64/XZ on every frame |
-| `e2e_strict` | bool | `false` | If `true`, drop frames that fail E2E check |
+| `validate_e2e` | bool | `true` | Verify the E2E CRC on every RDI/SHI/SPI frame (CRC-32 on interface v1.1.0+, CRC-64/XZ on v1.0.x). Results go to `E2E`; CRC mismatches are logged and the frame is still published |
+| `e2e_strict` | bool | `false` | If `true`, drop frames whose E2E Length or Data ID does not match. CRC mismatches never drop a frame |
 
 ### Full launch-argument list (afi920.launch.py)
 
@@ -289,8 +297,8 @@ Shared across all four sensors:
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `transport_mode` | `tcp` | `tcp` or `udp` |
-| `validate_e2e` | `true` | Validate AUTOSAR E2E CRC on data streams |
-| `e2e_strict` | `false` | Drop frames on E2E mismatch |
+| `validate_e2e` | `true` | Validate the E2E CRC on data streams (results on `E2E`, no drop) |
+| `e2e_strict` | `false` | Drop frames on E2E Length/Data ID mismatch |
 | `parent_frame` | `base_link` | Common parent TF frame; each pose is broadcast as `parent_frame → <pos>_frame` |
 | `publish_tf` | `true` | Broadcast each sensor's mounting pose (from SPI) as TF |
 | `config_file` | `""` | Path to a YAML config file (overrides individual params; e.g. `config/multi_sensor.yaml`) |
@@ -317,6 +325,7 @@ uint8  sensor_id
 uint32 message_counter
 uint64 timestamp_measurement_ns      # sensor PTP timestamp (ns)
 uint8  data_qualifier                # 0=normal 1=not_available 2=reduced_coverage 3=reduced_perf
+                                     # 4=reduced_coverage_and_perf 5=test_mode 6=invalid (resend)
 
 float32 velocity_ambiguity_begin     # m/s  (default: -88.89)
 float32 velocity_ambiguity_end       # m/s  (default:  55.56)
@@ -489,6 +498,26 @@ float32 detection_range_end    # m
 float32 signal_to_noise_ratio  # dB
 ```
 
+### `afi920_msgs/E2eStatus` — per-message E2E result
+
+```
+std_msgs/Header header        # stamp = stamp of the matching data message
+                              # (verification time when data_published is false)
+uint8  stream                 # 0=RDI  1=SHI  2=SPI
+uint8  result                 # 0=ok  1=crc_mismatch  2=crc_zero (not a pass)  3=not_checked
+uint8  crc_format             # 0=unknown  1=CRC-32 (v1.1.0+)  2=CRC-64/XZ (v1.0.x)
+bool   length_ok              # E2E Length equals the payload size
+bool   data_id_ok             # E2E Data ID matches the stream
+uint32 e2e_counter
+uint32 missing_before         # E2E Counter values skipped since the previous message
+bool   sensor_restarted       # E2E Counter decreased
+bool   data_published         # false: dropped by e2e_strict or payload parse failure
+uint32 message_counter        # ISO 23150 MessageCounter (0 when not parsed)
+uint8  data_qualifier         # ISO 23150 DataQualifier (0 when not parsed)
+```
+
+Message loss is counted from `missing_before`. MessageCounter is not used for loss detection because interface v1.1.0+ repeats it on resend.
+
 ---
 
 ## 10. PointCloud2 Field Reference
@@ -582,7 +611,7 @@ Tests performed: Discovery · Config API · RDI/SHII/SPI streams · SOME/IP + E2
 
 ### `rdi_diag.py` — byte-level RDI protocol debugger
 
-Captures raw frames and validates SOME/IP framing, E2E CRC, and RDI header/detection fields.
+Captures raw frames and validates SOME/IP framing, E2E CRC (CRC-32 or CRC-64/XZ, same rule as the driver), and RDI header/detection fields.
 
 ```bash
 # UDP (default)
@@ -592,7 +621,7 @@ python3 rdi_diag.py --sensor-ip 192.168.10.150 --port 30509 --max-frames 5
 python3 rdi_diag.py --sensor-ip 192.168.10.150 --tcp --max-frames 5
 ```
 
-Output includes: SOME/IP header, E2E CRC result, RDI header fields, first 10 detections with NaN diagnostics.
+Output includes: SOME/IP header, E2E CRC result and matched format, RDI header fields, first 10 detections with NaN diagnostics.
 
 ---
 
@@ -618,12 +647,24 @@ ROS 2 topic (sensor_msgs / afi920_msgs)
     ↑
 ISO 23150 payload (binary, little-endian)
     ↑
-AUTOSAR E2E Profile 7 header (20 B · CRC-64/XZ)
+E2E header (20 B · big-endian · CRC / Length / Counter / Data ID)
     ↑
 SOME/IP-TP header (16 B + 4 B TP · big-endian)
     ↑
 TCP / UDP
 ```
+
+**Sensor interface compatibility:** the format is detected from received frames; no parameter selects it.
+
+| Item | Interface v1.0.x | Interface v1.1.0+ |
+|------|------------------|-------------------|
+| E2E CRC field (bytes 0–7) | CRC-64/XZ over header bytes 8–19 and the payload | bytes 0–3 = 0, bytes 4–7 = IEEE 802.3 CRC-32 over the payload |
+| Config API frame | SOME/IP header + JSON | SOME/IP header + E2E header + JSON |
+| Stream destination at startup | Applied with `SetNetworkConfig` | Read with `GetNetworkConfig`; differences are logged and the sensor is not changed |
+| Message loss detection | E2E Counter | E2E Counter |
+| Frames excluded from `PointCloud2` | DataQualifier 1 and 6 | DataQualifier 1 and 6 |
+
+On interface v1.1.0+, changing the stream protocol, port, or destination requires diagnostic mode, `SetNetworkConfig`, and a sensor restart. The driver does not perform these steps.
 
 **Multi-sensor:** each sensor is distinguished by its **IP** (and ROS namespace),
 not by port. All sensors use the same default ports (30509/30510/30511);
@@ -639,7 +680,10 @@ not by port. All sensors use the same default ports (30509/30510/30511);
 | Node starts but no topics | `sensor_ip` correct? Port 30509 reachable? |
 | Topics exist but no messages | `ros2 topic hz` shows 0 Hz → check firewall rules for ports 30509–30511 |
 | `RDI` detections array always empty | Object in FoV? Check `min_range`/`max_range` and `min_snr` |
-| E2E errors in node log | Normal during startup; persistent errors → switch TCP (`transport_mode:=tcp`) |
+| E2E CRC mismatch warnings in node log | Frames are still published. Check `ros2 topic echo /afi920/E2E` (`result`, `crc_format`); persistent mismatches over UDP → switch TCP (`transport_mode:=tcp`) |
+| `Sensor stream config differs from driver parameters` warning | Interface v1.1.0+ sensor uses another stream protocol or port → match `transport_mode` and port parameters to the sensor, or reconfigure and restart the sensor |
+| No cloud in RViz with Fixed Frame `base_link` | No TF to the sensor frame → keep `publish_tf` and `publish_performance` at `true`, or publish the transform yourself |
+| Sensor frame jumps between two poses | Driver and URDF/another node publish the same transform → set `publish_tf:=false` |
 | RDI missing, SHI/SPI fine | RDI buffer overrun → force TCP (512 KB buffer vs 400 KB UDP) |
 | Multi-sensor: topics missing | Verify each `<pos>_ip` is reachable and namespaces differ |
 | `colcon build` fails | Build `afi920_msgs` first; check `$ROS_DISTRO` is sourced |
@@ -653,7 +697,7 @@ not by port. All sensors use the same default ports (30509/30510/30511);
 ```
 BUILD   → colcon build --packages-select afi920_msgs afi920_driver
 LAUNCH  → ros2 launch afi920_driver afi920.launch.py sensor_ip:=<IP>
-TOPICS  → /afi920/PointCloud2  /afi920/RDI  /afi920/SHI  /afi920/SPI
+TOPICS  → /afi920/PointCloud2  /afi920/RDI  /afi920/SHI  /afi920/SPI  /afi920/E2E
 TUNE    → ros2 param set /afi920/afi920_driver min_range 1.0   (live)
 MULTI   → ros2 launch afi920_driver multi_sensor.launch.py front_ip:=... rear_ip:=...
 VERIFY  → python3 tools/live_data_check.py [IP] [--duration N]

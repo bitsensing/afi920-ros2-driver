@@ -107,6 +107,7 @@ TEST(SomeipParserTest, E2eValidateAcceptsProtectedFrame) {
 
     E2eHeader e2e{};
     EXPECT_EQ(e2e_validate(frame.data(), frame.size(), e2e), E2eStatus::kOk);
+    EXPECT_EQ(e2e.format, E2eCrcFormat::kCrc64Xz);
     EXPECT_EQ(e2e.length, 4u);
     EXPECT_EQ(e2e.counter, 7u);
     EXPECT_EQ(e2e.data_id, kE2eDataIdRdi);
@@ -126,6 +127,101 @@ TEST(SomeipParserTest, E2eValidateRejectsCorruptedFrame) {
 
     E2eHeader e2e{};
     EXPECT_EQ(e2e_validate(frame.data(), frame.size(), e2e), E2eStatus::kCrcMismatch);
+}
+
+// ─── Interface v1.1.0+: CRC-32 over the body only ───
+
+TEST(SomeipParserTest, E2eCrc32KnownAnswer) {
+    const char* text = "123456789";
+    EXPECT_EQ(e2e_crc32(reinterpret_cast<const uint8_t*>(text), 9), 0xCBF43926u);
+}
+
+TEST(SomeipParserTest, E2eCrc32ChainedEqualsOneShot) {
+    const char* text = "123456789";
+    const auto* p = reinterpret_cast<const uint8_t*>(text);
+    EXPECT_EQ(e2e_crc32_update(e2e_crc32_update(0u, p, 4), p + 4, 5), 0xCBF43926u);
+}
+
+TEST(SomeipParserTest, E2eValidateAcceptsCrc32Frame) {
+    const uint8_t body[] = {0x10, 0x20, 0x30, 0x40, 0x50};
+    std::vector<uint8_t> frame(kE2eHeaderSize + sizeof(body));
+    std::memcpy(frame.data() + kE2eHeaderSize, body, sizeof(body));
+    e2e_build_header(frame.data(), kE2eDataIdShii, 42, body, sizeof(body));
+
+    EXPECT_EQ(frame[0] | frame[1] | frame[2] | frame[3], 0);
+
+    E2eHeader e2e{};
+    EXPECT_EQ(e2e_validate(frame.data(), frame.size(), e2e), E2eStatus::kOk);
+    EXPECT_EQ(e2e.format, E2eCrcFormat::kCrc32);
+    EXPECT_EQ(e2e.crc, static_cast<uint64_t>(e2e_crc32(body, sizeof(body))));
+    EXPECT_EQ(e2e.length, sizeof(body));
+    EXPECT_EQ(e2e.counter, 42u);
+    EXPECT_EQ(e2e.data_id, kE2eDataIdShii);
+}
+
+TEST(SomeipParserTest, E2eValidateCrc32IgnoresHeaderFields) {
+    // v1.1.0+ CRC covers the body only; a Counter change keeps the CRC valid.
+    const uint8_t body[] = {0xAB, 0xCD};
+    std::vector<uint8_t> frame(kE2eHeaderSize + sizeof(body));
+    std::memcpy(frame.data() + kE2eHeaderSize, body, sizeof(body));
+    e2e_build_header(frame.data(), kE2eDataIdRdi, 1, body, sizeof(body));
+    pack_be32(frame.data() + kE2eOffsetCounter, 2);
+
+    E2eHeader e2e{};
+    EXPECT_EQ(e2e_validate(frame.data(), frame.size(), e2e), E2eStatus::kOk);
+    EXPECT_EQ(e2e.format, E2eCrcFormat::kCrc32);
+}
+
+TEST(SomeipParserTest, E2eValidateRejectsCorruptedCrc32Frame) {
+    const uint8_t body[] = {0x01, 0x02, 0x03};
+    std::vector<uint8_t> frame(kE2eHeaderSize + sizeof(body));
+    std::memcpy(frame.data() + kE2eHeaderSize, body, sizeof(body));
+    e2e_build_header(frame.data(), kE2eDataIdSpi, 9, body, sizeof(body));
+    frame[kE2eHeaderSize + 1] ^= 0x80;
+
+    E2eHeader e2e{};
+    EXPECT_EQ(e2e_validate(frame.data(), frame.size(), e2e), E2eStatus::kCrcMismatch);
+    EXPECT_EQ(e2e.format, E2eCrcFormat::kUnknown);
+}
+
+TEST(SomeipParserTest, E2eValidateZeroCrcIsNotPass) {
+    std::vector<uint8_t> frame(kE2eHeaderSize + 2, 0);
+    pack_be32(frame.data() + kE2eOffsetLength, 2);
+    pack_be32(frame.data() + kE2eOffsetDataId, kE2eDataIdRdi);
+
+    E2eHeader e2e{};
+    EXPECT_EQ(e2e_validate(frame.data(), frame.size(), e2e), E2eStatus::kCrcZero);
+}
+
+TEST(SomeipParserTest, E2eCounterTrackerCountsMissing) {
+    E2eCounterTracker tracker;
+    EXPECT_EQ(tracker.Update(10).missing, 0u);
+    EXPECT_EQ(tracker.Update(11).missing, 0u);
+    EXPECT_EQ(tracker.Update(14).missing, 2u);
+}
+
+TEST(SomeipParserTest, E2eCounterTrackerWrapsAround) {
+    E2eCounterTracker tracker;
+    tracker.Update(0xFFFFFFFEu);
+    EXPECT_EQ(tracker.Update(0xFFFFFFFFu).missing, 0u);
+    EXPECT_EQ(tracker.Update(0x00000001u).missing, 1u);
+}
+
+TEST(SomeipParserTest, E2eCounterTrackerDetectsRestart) {
+    E2eCounterTracker tracker;
+    tracker.Update(500);
+    const E2eCounterUpdate update = tracker.Update(1);
+    EXPECT_TRUE(update.restarted);
+    EXPECT_EQ(update.missing, 0u);
+    EXPECT_EQ(tracker.Update(2).missing, 0u);
+}
+
+TEST(SomeipParserTest, E2eCounterTrackerRepeatIsNotLoss) {
+    E2eCounterTracker tracker;
+    tracker.Update(5);
+    const E2eCounterUpdate update = tracker.Update(5);
+    EXPECT_FALSE(update.restarted);
+    EXPECT_EQ(update.missing, 0u);
 }
 
 TEST(SomeipParserTest, TpReassemblerSessionReset) {

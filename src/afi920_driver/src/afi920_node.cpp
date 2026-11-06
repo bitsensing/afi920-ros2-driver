@@ -53,6 +53,8 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     }
     pub_marker_ = this->create_publisher<visualization_msgs::msg::Marker>(
         "detection_count", rclcpp::SensorDataQoS());
+    pub_e2e_ = this->create_publisher<afi920_msgs::msg::E2eStatus>(
+        "E2E", rclcpp::SensorDataQoS());
 
     // --- TF broadcaster (mounting pose from SPI) ---
     if (publish_tf_) {
@@ -78,39 +80,7 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     pc_builder_ = std::make_unique<PointCloudBuilder>(pc_config);
 
     // --- Configure sensor stream destination ---
-    {
-        std::string host = host_ip_;
-        if (host == "auto") {
-            host = detect_local_ip(sensor_ip_);
-            if (host.empty()) {
-                RCLCPP_WARN(get_logger(), "Failed to detect local IP for sensor %s",
-                            sensor_ip_.c_str());
-            } else {
-                RCLCPP_INFO(get_logger(), "Detected local IP: %s", host.c_str());
-            }
-        }
-        if (!host.empty()) {
-            int rc = configure_streams(
-                sensor_ip_,
-                static_cast<uint16_t>(config_port_),
-                host,
-                static_cast<uint16_t>(data_port_),
-                static_cast<uint16_t>(shi_port_),
-                static_cast<uint16_t>(spi_port_),
-                5000,
-                transport_mode_);
-            if (rc == 0) {
-                RCLCPP_INFO(get_logger(),
-                    "Sensor configured: streams -> %s (RDI:%d SHI:%d SPI:%d, transport=%s)",
-                    host.c_str(), data_port_, shi_port_, spi_port_, transport_mode_.c_str());
-            } else {
-                RCLCPP_WARN(get_logger(),
-                    "Failed to configure sensor streams (rc=%d) -- "
-                    "sensor may already be configured or unreachable via TCP:%d",
-                    rc, config_port_);
-            }
-        }
-    }
+    configure_sensor_streams();
 
     // --- Create receivers ---
     if (transport_mode_ == "tcp") {
@@ -226,6 +196,72 @@ void Afi920Node::read_parameters()
     e2e_strict_.store(this->get_parameter("e2e_strict").as_bool());
 }
 
+// Sensor configuration
+
+void Afi920Node::configure_sensor_streams()
+{
+    std::string host = host_ip_;
+    if (host == "auto") {
+        host = detect_local_ip(sensor_ip_);
+        if (host.empty()) {
+            RCLCPP_WARN(get_logger(), "Failed to detect local IP for sensor %s",
+                        sensor_ip_.c_str());
+        } else {
+            RCLCPP_INFO(get_logger(), "Detected local IP: %s", host.c_str());
+        }
+    }
+    if (host.empty()) {
+        return;
+    }
+
+    StreamConfigRequest request;
+    request.host_ip = host;
+    request.data_port = static_cast<uint16_t>(data_port_);
+    request.shi_port = static_cast<uint16_t>(shi_port_);
+    request.spi_port = static_cast<uint16_t>(spi_port_);
+    request.transport_mode = transport_mode_;
+
+    StreamConfigResult result;
+    const int rc = sync_stream_config(
+        sensor_ip_, static_cast<uint16_t>(config_port_), request, 5000, result);
+    if (rc != 0) {
+        RCLCPP_WARN(get_logger(),
+            "Failed to configure sensor streams (rc=%d) -- "
+            "sensor may already be configured or unreachable via TCP:%d",
+            rc, config_port_);
+        return;
+    }
+
+    if (result.format == ConfigApiFormat::kLegacy) {
+        RCLCPP_INFO(get_logger(),
+            "Sensor configured (Config API v1.0.x): streams -> %s (RDI:%d SHI:%d SPI:%d, transport=%s)",
+            host.c_str(), data_port_, shi_port_, spi_port_, transport_mode_.c_str());
+        return;
+    }
+
+    if (!result.response_crc_ok) {
+        RCLCPP_WARN(get_logger(), "GetNetworkConfig response E2E CRC mismatch");
+    }
+    if (result.mismatches.empty()) {
+        RCLCPP_INFO(get_logger(),
+            "Sensor stream config matches (Config API v1.1.0+): RDI:%d SHI:%d SPI:%d, transport=%s",
+            data_port_, shi_port_, spi_port_, transport_mode_.c_str());
+        return;
+    }
+
+    // v1.1.0+ applies SetNetworkConfig only in diagnostic mode and after Restart,
+    // so the driver reports the difference instead of writing the sensor NVM.
+    std::string detail;
+    for (const auto& m : result.mismatches) {
+        detail += (detail.empty() ? "" : ", ") + m;
+    }
+    RCLCPP_WARN(get_logger(),
+        "Sensor stream config differs from driver parameters (Config API v1.1.0+): %s. "
+        "The driver does not change it: SetNetworkConfig(0x0021) requires diagnostic mode "
+        "(SetMode 0x00E1) and takes effect after Restart(0x0014).",
+        detail.c_str());
+}
+
 // Thread functions
 
 void Afi920Node::rdi_thread_func()
@@ -287,9 +323,10 @@ void Afi920Node::spi_thread_func()
 
 bool Afi920Node::consume_e2e_header(const uint8_t*& payload, size_t& payload_len,
                                     uint32_t expected_data_id, const char* stream_name,
-                                    E2eHeader* out)
+                                    E2eVerdict& verdict)
 {
-    E2eHeader e2e{};
+    verdict = E2eVerdict{};
+    E2eHeader& e2e = verdict.header;
     if (payload_len < kE2eHeaderSize) {
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
             "%s frame shorter than E2E header: %zu", stream_name, payload_len);
@@ -299,6 +336,7 @@ bool Afi920Node::consume_e2e_header(const uint8_t*& payload, size_t& payload_len
     E2eStatus status = E2eStatus::kOk;
     if (validate_e2e_.load(std::memory_order_relaxed)) {
         status = e2e_validate(payload, payload_len, e2e);
+        verdict.checked = true;
     } else if (e2e_parse(payload, payload_len, e2e) < 0) {
         status = E2eStatus::kTooShort;
     }
@@ -308,32 +346,42 @@ bool Afi920Node::consume_e2e_header(const uint8_t*& payload, size_t& payload_len
             "%s E2E parse failed: payload_len=%zu", stream_name, payload_len);
         return false;
     }
+    verdict.parsed = true;
+    verdict.status = status;
 
     const size_t iso_len = payload_len - kE2eHeaderSize;
-    bool metadata_ok = true;
 
     if (e2e.length != iso_len) {
-        metadata_ok = false;
+        verdict.length_ok = false;
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
             "%s E2E length mismatch: e2e=%u actual=%zu",
             stream_name, static_cast<unsigned int>(e2e.length), iso_len);
     }
 
     if (e2e.data_id != expected_data_id) {
-        metadata_ok = false;
+        verdict.data_id_ok = false;
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
             "%s E2E data_id mismatch: e2e=0x%08X expected=0x%08X",
             stream_name, static_cast<unsigned int>(e2e.data_id),
             static_cast<unsigned int>(expected_data_id));
     }
+    const bool metadata_ok = verdict.length_ok && verdict.data_id_ok;
 
+    // CRC results are reported on ~/E2E and in the log; frames are never dropped on CRC.
     if (status == E2eStatus::kCrcMismatch) {
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
             "%s E2E CRC mismatch (counter=%u, data_id=0x%08X)",
             stream_name, static_cast<unsigned int>(e2e.counter),
             static_cast<unsigned int>(e2e.data_id));
-        if (e2e_strict_.load(std::memory_order_relaxed)) {
-            return false;
+    } else if (status == E2eStatus::kCrcZero) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "%s E2E CRC field is 0, not verified (counter=%u)",
+            stream_name, static_cast<unsigned int>(e2e.counter));
+    } else if (e2e.format != E2eCrcFormat::kUnknown) {
+        const auto format = static_cast<uint8_t>(e2e.format);
+        if (e2e_format_.exchange(format, std::memory_order_relaxed) != format) {
+            RCLCPP_INFO(get_logger(), "%s E2E format detected: %s",
+                        stream_name, e2e_crc_format_name(e2e.format));
         }
     }
 
@@ -343,34 +391,85 @@ bool Afi920Node::consume_e2e_header(const uint8_t*& payload, size_t& payload_len
 
     payload += kE2eHeaderSize;
     payload_len = iso_len;
-    if (out) {
-        *out = e2e;
-    }
     return true;
 }
 
-void Afi920Node::deliver_rdi_frame(RdiFrame& frame)
+void Afi920Node::track_e2e_counter(E2eCounterTracker& tracker, const char* stream_name,
+                                   E2eVerdict& verdict)
 {
-    total_packets_.fetch_add(1);
-
-    if (!first_rdi_) {
-        uint32_t expected = last_rdi_counter_ + 1;
-        if (frame.message.message_counter != expected) {
-            uint32_t gap = frame.message.message_counter - expected;
-            lost_packets_.fetch_add(gap);
-
-            float loss_pct = (total_packets_.load() > 0)
-                ? (100.0f * lost_packets_.load() / total_packets_.load()) : 0.0f;
-            RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
-                "Packet loss: %u/%u (%.1f%%)",
-                lost_packets_.load(), total_packets_.load(), loss_pct);
-        }
-    } else {
-        first_rdi_ = false;
+    // MessageCounter carries the scan index on v1.1.0+ (repeated on resend,
+    // skipped on late seals), so message loss is judged by the E2E Counter.
+    const uint32_t counter = verdict.header.counter;
+    verdict.counter = tracker.Update(counter);
+    if (verdict.counter.restarted) {
+        RCLCPP_WARN(get_logger(), "%s E2E Counter decreased to %u -- sensor restarted",
+                    stream_name, static_cast<unsigned int>(counter));
+    } else if (verdict.counter.missing > 0) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "%s E2E Counter gap: %u message(s) missing before counter=%u",
+            stream_name, static_cast<unsigned int>(verdict.counter.missing),
+            static_cast<unsigned int>(counter));
     }
-    last_rdi_counter_ = frame.message.message_counter;
+}
 
-    on_rdi_frame(frame);
+void Afi920Node::publish_e2e_status(uint8_t stream, const E2eVerdict& verdict,
+                                    const rclcpp::Time& stamp, bool data_published,
+                                    uint32_t message_counter, uint8_t data_qualifier)
+{
+    using afi920_msgs::msg::E2eStatus;
+    if (!pub_e2e_ || !verdict.parsed) return;
+
+    E2eStatus st;
+    st.header.stamp = stamp;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        st.header.frame_id = frame_id_;
+    }
+    st.stream = stream;
+    if (!verdict.checked) {
+        st.result = E2eStatus::RESULT_NOT_CHECKED;
+    } else if (verdict.status == afi920_driver::E2eStatus::kCrcMismatch) {
+        st.result = E2eStatus::RESULT_CRC_MISMATCH;
+    } else if (verdict.status == afi920_driver::E2eStatus::kCrcZero) {
+        st.result = E2eStatus::RESULT_CRC_ZERO;
+    } else {
+        st.result = E2eStatus::RESULT_OK;
+    }
+    switch (verdict.header.format) {
+        case E2eCrcFormat::kCrc32:
+            st.crc_format = E2eStatus::CRC_FORMAT_CRC32;
+            break;
+        case E2eCrcFormat::kCrc64Xz:
+            st.crc_format = E2eStatus::CRC_FORMAT_CRC64_XZ;
+            break;
+        default:
+            st.crc_format = E2eStatus::CRC_FORMAT_UNKNOWN;
+            break;
+    }
+    st.length_ok = verdict.length_ok;
+    st.data_id_ok = verdict.data_id_ok;
+    st.e2e_counter = verdict.header.counter;
+    st.missing_before = verdict.counter.missing;
+    st.sensor_restarted = verdict.counter.restarted;
+    st.data_published = data_published;
+    st.message_counter = message_counter;
+    st.data_qualifier = data_qualifier;
+    pub_e2e_->publish(std::move(st));
+}
+
+void Afi920Node::deliver_rdi_frame(RdiFrame& frame, const E2eVerdict& verdict)
+{
+    const uint32_t total = total_packets_.fetch_add(1) + 1;
+    const uint32_t missing = verdict.counter.missing;
+    if (missing > 0) {
+        const uint32_t lost = lost_packets_.fetch_add(missing) + missing;
+        const float loss_pct = 100.0f * static_cast<float>(lost) /
+                               static_cast<float>(static_cast<uint64_t>(total) + lost);
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "Packet loss: %u lost, %u received (%.1f%%)", lost, total, loss_pct);
+    }
+
+    on_rdi_frame(frame, verdict);
 }
 
 void Afi920Node::process_rdi_datagram(const uint8_t* data, size_t len)
@@ -449,11 +548,18 @@ void Afi920Node::process_rdi_datagram(const uint8_t* data, size_t len)
         }
     }
 
-    E2eHeader e2e;
-    if (!consume_e2e_header(payload, payload_len, kE2eDataIdRdi, "RDI", &e2e)) {
+    using afi920_msgs::msg::E2eStatus;
+    E2eVerdict verdict;
+    const bool keep = consume_e2e_header(payload, payload_len, kE2eDataIdRdi, "RDI", verdict);
+    if (verdict.parsed) {
+        track_e2e_counter(rdi_counter_, "RDI", verdict);
+    }
+    if (!keep) {
+        publish_e2e_status(E2eStatus::STREAM_RDI, verdict, this->now(), false, 0, 0);
         if (is_tp) rdi_tp_.Reset();
         return;
     }
+    const E2eHeader& e2e = verdict.header;
     if (diag) {
         RCLCPP_INFO(get_logger(),
             "[DIAG #%u] E2E stripped: crc=0x%016" PRIX64 " len=%u counter=%u data_id=0x%08X iso_len=%zu",
@@ -477,13 +583,14 @@ void Afi920Node::process_rdi_datagram(const uint8_t* data, size_t len)
                 rdi_diag_count_, frame.message.num_detections,
                 frame.message.message_counter, frame.message.sensor_id);
         }
-        deliver_rdi_frame(frame);
+        deliver_rdi_frame(frame, verdict);
     } else {
         if (diag) {
             RCLCPP_WARN(get_logger(),
                 "[DIAG #%u] RDI parse FAILED (rc=%d, payload_len=%zu)",
                 rdi_diag_count_, parse_rc, payload_len);
         }
+        publish_e2e_status(E2eStatus::STREAM_RDI, verdict, this->now(), false, 0, 0);
     }
 
     if (is_tp) rdi_tp_.Reset();
@@ -498,13 +605,20 @@ void Afi920Node::process_shi_datagram(const uint8_t* data, size_t len)
     if (!someip_validate(hdr)) { return; }
     if (hdr.method_id != kEventShii) return;
 
+    using afi920_msgs::msg::E2eStatus;
     const uint8_t* payload = data + kSomeipHeaderSize;
     size_t payload_len = len - kSomeipHeaderSize;
-    if (!consume_e2e_header(payload, payload_len, kE2eDataIdShii, "SHII")) return;
+    E2eVerdict verdict;
+    const bool keep = consume_e2e_header(payload, payload_len, kE2eDataIdShii, "SHII", verdict);
+    if (verdict.parsed) {
+        track_e2e_counter(shi_counter_, "SHII", verdict);
+    }
 
     ShiMessage msg{};
-    if (shi_parser_.Parse(payload, payload_len, msg) == 0) {
-        on_shi_message(msg);
+    if (keep && shi_parser_.Parse(payload, payload_len, msg) == 0) {
+        on_shi_message(msg, verdict);
+    } else {
+        publish_e2e_status(E2eStatus::STREAM_SHI, verdict, this->now(), false, 0, 0);
     }
 }
 
@@ -518,23 +632,40 @@ void Afi920Node::process_spi_datagram(const uint8_t* data, size_t len)
 
     if (hdr.method_id != kEventSpi) return;
 
+    using afi920_msgs::msg::E2eStatus;
     const uint8_t* payload = data + kSomeipHeaderSize;
     size_t payload_len = len - kSomeipHeaderSize;
-    if (!consume_e2e_header(payload, payload_len, kE2eDataIdSpi, "SPI")) return;
+    E2eVerdict verdict;
+    const bool keep = consume_e2e_header(payload, payload_len, kE2eDataIdSpi, "SPI", verdict);
+    if (verdict.parsed) {
+        track_e2e_counter(spi_counter_, "SPI", verdict);
+    }
 
     SpiMessage msg{};
-    if (spi_parser_.Parse(payload, payload_len, msg) == 0) {
-        on_spi_message(msg);
+    if (keep && spi_parser_.Parse(payload, payload_len, msg) == 0) {
+        on_spi_message(msg, verdict);
+    } else {
+        publish_e2e_status(E2eStatus::STREAM_SPI, verdict, this->now(), false, 0, 0);
     }
 }
 
 // Data callbacks
 
-void Afi920Node::on_rdi_frame(const RdiFrame& frame)
+void Afi920Node::on_rdi_frame(const RdiFrame& frame, const E2eVerdict& verdict)
 {
     uint64_t fc = rdi_frame_count_.fetch_add(1, std::memory_order_relaxed) + 1;
 
     if (!pub_pointcloud_) return;
+
+    // DQ 1 (not this scan's data) and DQ 6 (resend of the previous scan) are not
+    // new measurements. They reach DetectionArray only, with data_qualifier set.
+    const auto dq = frame.message.data_qualifier;
+    const bool publish_cloud = (dq != BTS_DQ_NOT_AVAILABLE && dq != BTS_DQ_INVALID);
+    if (!publish_cloud) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "RDI DataQualifier=%u frame excluded from PointCloud2 (message_counter=%u)",
+            static_cast<unsigned int>(dq), frame.message.message_counter);
+    }
 
     auto stamp = this->now();
 
@@ -545,7 +676,9 @@ void Afi920Node::on_rdi_frame(const RdiFrame& frame)
 
     {
         std::lock_guard<std::mutex> lock(config_mutex_);
-        cloud = pc_builder_->build(frame, stamp);
+        if (publish_cloud) {
+            cloud = pc_builder_->build(frame, stamp);
+        }
         if (build_arr) {
             arr = pc_builder_->build_detection_array(frame, stamp);
         }
@@ -555,13 +688,18 @@ void Afi920Node::on_rdi_frame(const RdiFrame& frame)
         arr.timestamp_measurement_ns = frame.message.timestamp;
     }
 
-    pub_pointcloud_->publish(std::move(cloud));
+    if (publish_cloud) {
+        pub_pointcloud_->publish(std::move(cloud));
+    }
     if (build_arr) {
         pub_rdi_->publish(std::move(arr));
     }
+    publish_e2e_status(afi920_msgs::msg::E2eStatus::STREAM_RDI, verdict, stamp,
+                       publish_cloud || build_arr, frame.message.message_counter,
+                       static_cast<uint8_t>(dq));
 
     // Publish detection count as text marker for rviz overlay
-    if (pub_marker_) {
+    if (publish_cloud && pub_marker_) {
         visualization_msgs::msg::Marker marker;
         marker.header.frame_id = frame_id_;
         marker.header.stamp = stamp;
@@ -589,12 +727,13 @@ void Afi920Node::on_rdi_frame(const RdiFrame& frame)
     }
 }
 
-void Afi920Node::on_shi_message(const ShiMessage& msg)
+void Afi920Node::on_shi_message(const ShiMessage& msg, const E2eVerdict& verdict)
 {
     if (!pub_shi_) return;
 
+    const rclcpp::Time stamp = this->now();
     afi920_msgs::msg::HealthInfo hi;
-    hi.header.stamp = this->now();
+    hi.header.stamp = stamp;
     {
         std::lock_guard<std::mutex> lock(config_mutex_);
         hi.header.frame_id = frame_id_;
@@ -639,28 +778,18 @@ void Afi920Node::on_shi_message(const ShiMessage& msg)
 
     hi.timestamp_measurement_ns = msg.timestamp;
 
-    // MessageCounter gap detection
-    if (!first_shi_) {
-        uint32_t expected = last_shi_counter_ + 1;
-        if (msg.message_counter != expected) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                "SHII MessageCounter gap: expected %u, got %u (lost %d frames)",
-                expected, msg.message_counter,
-                static_cast<int>(msg.message_counter - expected));
-        }
-    }
-    first_shi_ = false;
-    last_shi_counter_ = msg.message_counter;
-
     pub_shi_->publish(std::move(hi));
+    publish_e2e_status(afi920_msgs::msg::E2eStatus::STREAM_SHI, verdict, stamp, true,
+                       msg.message_counter, static_cast<uint8_t>(msg.data_qualifier));
 }
 
-void Afi920Node::on_spi_message(const SpiMessage& msg)
+void Afi920Node::on_spi_message(const SpiMessage& msg, const E2eVerdict& verdict)
 {
     if (!pub_spi_) return;
 
+    const rclcpp::Time stamp = this->now();
     afi920_msgs::msg::SensorPerformance sp;
-    sp.header.stamp = this->now();
+    sp.header.stamp = stamp;
     {
         std::lock_guard<std::mutex> lock(config_mutex_);
         sp.header.frame_id = frame_id_;
@@ -728,25 +857,12 @@ void Afi920Node::on_spi_message(const SpiMessage& msg)
         dst.signal_to_noise_ratio = src.signal_to_noise_ratio;
     }
 
-    // MessageCounter gap detection
-    if (!first_spi_) {
-        uint32_t expected = last_spi_counter_ + 1;
-        if (msg.message_counter != expected) {
-            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
-                "SPI MessageCounter gap: expected %u, got %u (lost %d frames)",
-                expected, msg.message_counter,
-                static_cast<int>(msg.message_counter - expected));
-        }
-    }
-    first_spi_ = false;
-    last_spi_counter_ = msg.message_counter;
-
     // Broadcast mounting pose as TF: parent_frame -> frame_id.
     // Lets RViz/consumers place each sensor's cloud at its calibrated position
     // when the fixed frame is set to parent_frame_id (e.g. base_link).
     if (tf_broadcaster_) {
         geometry_msgs::msg::TransformStamped tf;
-        tf.header.stamp = sp.header.stamp;
+        tf.header.stamp = stamp;
         tf.header.frame_id = parent_frame_id_;
         {
             std::lock_guard<std::mutex> lock(config_mutex_);
@@ -767,6 +883,8 @@ void Afi920Node::on_spi_message(const SpiMessage& msg)
     }
 
     pub_spi_->publish(std::move(sp));
+    publish_e2e_status(afi920_msgs::msg::E2eStatus::STREAM_SPI, verdict, stamp, true,
+                       msg.message_counter, static_cast<uint8_t>(msg.data_qualifier));
 }
 
 // Dynamic parameters

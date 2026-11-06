@@ -4,6 +4,7 @@ import argparse
 import math
 import socket
 import struct
+import zlib
 
 SOMEIP_HDR = 16
 TP_HDR = 4
@@ -53,9 +54,23 @@ def consume_e2e(payload):
         "counter": struct.unpack_from(">I", payload, 12)[0],
         "data_id": struct.unpack_from(">I", payload, 16)[0],
     }
-    actual_crc = crc64_xz(payload[8:])
-    e2e["crc_ok"] = (actual_crc == e2e["crc"])
-    e2e["actual_crc"] = actual_crc
+    # Same rule as the driver (e2e.cpp): CRC 0 never passes. Interface v1.1.0+
+    # keeps bytes 0..3 at 0 and puts a CRC-32 over the body in bytes 4..7;
+    # interface v1.0.x puts a CRC-64/XZ over bytes 8.. in bytes 0..7.
+    crc = e2e["crc"]
+    e2e["crc_format"] = None
+    e2e["actual_crc32"] = None
+    e2e["actual_crc64"] = None
+    if crc != 0:
+        if (crc >> 32) == 0:
+            e2e["actual_crc32"] = zlib.crc32(payload[E2E_HDR:])
+            if e2e["actual_crc32"] == crc:
+                e2e["crc_format"] = "CRC-32"
+        if e2e["crc_format"] is None:
+            e2e["actual_crc64"] = crc64_xz(payload[8:])
+            if e2e["actual_crc64"] == crc:
+                e2e["crc_format"] = "CRC-64/XZ"
+    e2e["crc_ok"] = e2e["crc_format"] is not None
     e2e["length_ok"] = (e2e["length"] == len(payload) - E2E_HDR)
     e2e["data_id_ok"] = (e2e["data_id"] == E2E_DATA_ID_RDI)
     return payload[E2E_HDR:], e2e
@@ -155,10 +170,17 @@ def show(fnum, hdr, rh, payload, e2e=None, tpn=None):
             return
         print(
             f'  E2E: crc=0x{e2e["crc"]:016X} len={e2e["length"]} '
-            f'counter={e2e["counter"]} data_id=0x{e2e["data_id"]:08X}'
+            f'counter={e2e["counter"]} data_id=0x{e2e["data_id"]:08X} '
+            f'format={e2e["crc_format"] or "-"}'
         )
-        if not e2e["crc_ok"]:
-            print(f'       \033[93mCRC mismatch: actual=0x{e2e["actual_crc"]:016X}\033[0m')
+        if e2e["crc"] == 0:
+            print('       \033[93mCRC field is 0 (not verified)\033[0m')
+        elif not e2e["crc_ok"]:
+            actual = []
+            if e2e["actual_crc32"] is not None:
+                actual.append(f'crc32=0x{e2e["actual_crc32"]:08X}')
+            actual.append(f'crc64=0x{e2e["actual_crc64"]:016X}')
+            print(f'       \033[93mCRC mismatch: actual {" ".join(actual)}\033[0m')
         if not e2e["length_ok"]:
             print(f'       \033[93mlength mismatch: actual={len(payload)}\033[0m')
         if not e2e["data_id_ok"]:

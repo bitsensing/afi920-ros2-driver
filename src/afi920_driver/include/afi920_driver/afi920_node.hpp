@@ -4,13 +4,16 @@
  * @brief ROS2 node for AFI920 4D Imaging Radar
  *
  * Handles UDP reception, SOME/IP parsing, and payload deserialization
- * directly — no external SDK dependency.
+ * directly — no external SDK dependency. Interface v1.0.x and v1.1.0+
+ * sensors are both supported; the E2E CRC and Config API formats are
+ * detected from the received frames.
  *
  * Published topics (all relative, namespace-prefixed):
  *   ~/PointCloud2  sensor_msgs/PointCloud2       (18 FLOAT32 fields)
  *   ~/RDI          afi920_msgs/DetectionArray     (full detection data)
  *   ~/SHI          afi920_msgs/HealthInfo         (sensor health)
  *   ~/SPI          afi920_msgs/SensorPerformance  (sensor performance)
+ *   ~/E2E          afi920_msgs/E2eStatus          (E2E verdict per RDI/SHI/SPI message)
  */
 
 #ifndef AFI920_DRIVER__AFI920_NODE_HPP_
@@ -29,6 +32,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <afi920_msgs/msg/detection_array.hpp>
+#include <afi920_msgs/msg/e2e_status.hpp>
 #include <afi920_msgs/msg/health_info.hpp>
 #include <afi920_msgs/msg/sensor_performance.hpp>
 
@@ -44,6 +48,17 @@
 #include "afi920_driver/parsers/spi_parser.hpp"
 
 namespace afi920_driver {
+
+/// E2E verdict of one received message, published on ~/E2E.
+struct E2eVerdict {
+    E2eHeader header;
+    E2eStatus status = E2eStatus::kOk;
+    bool parsed = false;     ///< E2E header present (payload >= 20 bytes)
+    bool checked = false;    ///< CRC verified (validate_e2e)
+    bool length_ok = true;
+    bool data_id_ok = true;
+    E2eCounterUpdate counter;
+};
 
 class Afi920Node : public rclcpp::Node {
 public:
@@ -97,6 +112,7 @@ private:
     rclcpp::Publisher<afi920_msgs::msg::DetectionArray>::SharedPtr pub_rdi_;
     rclcpp::Publisher<afi920_msgs::msg::HealthInfo>::SharedPtr pub_shi_;
     rclcpp::Publisher<afi920_msgs::msg::SensorPerformance>::SharedPtr pub_spi_;
+    rclcpp::Publisher<afi920_msgs::msg::E2eStatus>::SharedPtr pub_e2e_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pub_marker_;
 
     // --- TF: broadcasts parent_frame -> frame_id using SPI sensor mounting pose ---
@@ -107,15 +123,14 @@ private:
     std::atomic<uint32_t> rdi_frame_seq_{0};
     std::atomic<uint32_t> total_packets_{0};
     std::atomic<uint32_t> lost_packets_{0};
-    uint32_t last_rdi_counter_ = 0;
-    bool first_rdi_ = true;
-    uint32_t last_shi_counter_{0};
-    bool first_shi_{true};
-    uint32_t last_spi_counter_{0};
-    bool first_spi_{true};
+    // E2E Counter trackers, each touched only by its receiver thread.
+    E2eCounterTracker rdi_counter_;
+    E2eCounterTracker shi_counter_;
+    E2eCounterTracker spi_counter_;
 
     // --- Diagnostics ---
     uint32_t rdi_diag_count_{0};
+    std::atomic<uint8_t> e2e_format_{static_cast<uint8_t>(E2eCrcFormat::kUnknown)};
 
     // --- Thread Functions ---
     void rdi_thread_func();
@@ -126,15 +141,21 @@ private:
     void process_rdi_datagram(const uint8_t* data, size_t len);
     void process_shi_datagram(const uint8_t* data, size_t len);
     void process_spi_datagram(const uint8_t* data, size_t len);
-    void deliver_rdi_frame(RdiFrame& frame);
+    void deliver_rdi_frame(RdiFrame& frame, const E2eVerdict& verdict);
     bool consume_e2e_header(const uint8_t*& payload, size_t& payload_len,
                             uint32_t expected_data_id, const char* stream_name,
-                            E2eHeader* out = nullptr);
+                            E2eVerdict& verdict);
+    void track_e2e_counter(E2eCounterTracker& tracker, const char* stream_name,
+                           E2eVerdict& verdict);
+    void publish_e2e_status(uint8_t stream, const E2eVerdict& verdict,
+                            const rclcpp::Time& stamp, bool data_published,
+                            uint32_t message_counter, uint8_t data_qualifier);
+    void configure_sensor_streams();
 
     // --- Data Callbacks (from receiver threads) ---
-    void on_rdi_frame(const RdiFrame& frame);
-    void on_shi_message(const ShiMessage& msg);
-    void on_spi_message(const SpiMessage& msg);
+    void on_rdi_frame(const RdiFrame& frame, const E2eVerdict& verdict);
+    void on_shi_message(const ShiMessage& msg, const E2eVerdict& verdict);
+    void on_spi_message(const SpiMessage& msg, const E2eVerdict& verdict);
 
     // --- Parameter Management ---
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr params_cb_handle_;

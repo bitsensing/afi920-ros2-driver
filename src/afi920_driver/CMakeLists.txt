@@ -110,6 +110,10 @@ if(BUILD_TESTING)
   target_link_libraries(test_someip_parser afi920_driver_lib)
   ament_target_dependencies(test_someip_parser ${DEPENDENCIES})
 
+  ament_add_gtest(test_config_client test/test_config_client.cpp)
+  target_link_libraries(test_config_client afi920_driver_lib)
+  ament_target_dependencies(test_config_client ${DEPENDENCIES})
+
   ament_add_gtest(test_rdi_parser test/test_rdi_parser.cpp)
   target_link_libraries(test_rdi_parser afi920_driver_lib)
   ament_target_dependencies(test_rdi_parser ${DEPENDENCIES})

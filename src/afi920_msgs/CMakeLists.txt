@@ -22,6 +22,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RecognisableObject.msg"
   "msg/ReferenceTarget.msg"
   "msg/SensorPerformance.msg"
+  # E2E verification result of RDI / SHII / SPI
+  "msg/E2eStatus.msg"
   DEPENDENCIES std_msgs sensor_msgs
 )
 

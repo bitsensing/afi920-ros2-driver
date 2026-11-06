@@ -5,6 +5,8 @@ afi920_driver:
     shi_port: 30510
     spi_port: 30511
     frame_id: "afi920"
+    parent_frame_id: "base_link"
+    publish_tf: true
     min_range: 0.0
     max_range: 300.0
     min_snr: 0.0

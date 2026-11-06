@@ -57,9 +57,9 @@ def generate_launch_description():
         DeclareLaunchArgument('transport_mode', default_value='tcp',
                               description='Data stream transport: tcp or udp'),
         DeclareLaunchArgument('validate_e2e', default_value='true',
-                              description='Validate AUTOSAR E2E CRC on data streams'),
+                              description='Validate E2E CRC (results on E2E topic, no drop)'),
         DeclareLaunchArgument('e2e_strict', default_value='false',
-                              description='Drop data stream frames on E2E mismatch'),
+                              description='Drop frames on E2E Length/Data ID mismatch'),
         DeclareLaunchArgument('parent_frame', default_value='base_link',
                               description='Common parent TF frame; each sensor pose is '
                                           'broadcast as parent_frame -> <pos>_frame'),

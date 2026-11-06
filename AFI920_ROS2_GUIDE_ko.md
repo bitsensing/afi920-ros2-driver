@@ -1,7 +1,7 @@
 # AFI920 ROS 2 드라이버 — AI 통합 가이드
 
 > **대상:** AI 에이전트, LLM 기반 자동화, bitsensing AFI920 4D 이미징 레이더를 ROS 2 시스템에 가장 빠르게 통합하려는 개발자  
-> **드라이버 버전:** 2.1.0 · **지원 ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04) · **아키텍처:** x86_64, aarch64  
+> **드라이버 버전:** 2.2.0 · **지원 ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04) · **아키텍처:** x86_64, aarch64  
 > **라이선스:** BSD-3-Clause
 
 ---
@@ -36,9 +36,9 @@ AFI920 ROS 2 드라이버는 AFI920 SDK를 컴포저블 ROS 2 노드로 래핑�
 | 센서 상태 & 장애 정보 | `~/SHI` | `afi920_msgs/HealthInfo` |
 | 센서 성능 & 장착 포즈 | `~/SPI` | `afi920_msgs/SensorPerformance` |
 
-이 외에도 RViz 오버레이용 `~/detection_count` 마커를 발행하고, SPI에서 받은 센서 장착 포즈를 `parent_frame_id → frame_id` TF 변환으로 브로드캐스트합니다. [§6](#6-발행-토픽) 참고.
+이 외에도 RViz 오버레이용 `~/detection_count` 마커와 RDI/SHI/SPI 메시지별 E2E 판정 결과 `~/E2E`를 발행하고, SPI에서 받은 센서 장착 포즈를 `parent_frame_id → frame_id` TF 변환으로 브로드캐스트합니다. [§6](#6-발행-토픽) 참고.
 
-모든 데이터 토픽은 `SensorDataQoS`를 사용합니다. TCP(기본값) 및 UDP 전송, AUTOSAR E2E CRC 검증, SOME/IP-TP 세그먼트 재조립, 센서 포즈 TF 브로드캐스트, `ros2 param set`을 통한 런타임 필터 조정을 지원합니다.
+모든 데이터 토픽은 `SensorDataQoS`를 사용합니다. TCP(기본값) 및 UDP 전송, 센서 인터페이스 v1.0.x와 v1.1.0 이후의 E2E CRC 검증(수신 프레임으로 형식 판별, 파라미터 없음), SOME/IP-TP 세그먼트 재조립, 센서 포즈 TF 브로드캐스트, `ros2 param set`을 통한 런타임 필터 조정을 지원합니다.
 
 ---
 
@@ -57,9 +57,11 @@ afi920-ros2-driver/
 │   │       ├── SensorPose.msg      ← 장착 위치 & 방향
 │   │       ├── FovSegment.msg      ← 각도 구역별 FoV 차단
 │   │       ├── RecognisableObject.msg ← 물체 유형별 감지 범위
-│   │       └── ReferenceTarget.msg ← 참조 표적 특성
+│   │       ├── ReferenceTarget.msg ← 참조 표적 특성
+│   │       └── E2eStatus.msg       ← 메시지별 E2E 판정 결과
 │   └── afi920_driver/
 │       ├── src/afi920_node.cpp     ← 메인 컴포저블 노드
+│       ├── config/                 ← 파라미터 YAML, afi920.rviz, multi_sensor.rviz
 │       └── launch/
 │           ├── afi920.launch.py        ← 단일 센서
 │           └── multi_sensor.launch.py  ← 최대 4개 센서
@@ -144,6 +146,7 @@ ros2 topic hz /afi920/PointCloud2      # ~10 Hz 예상
 ros2 topic echo /afi920/RDI --once
 ros2 topic echo /afi920/SHI --once
 ros2 topic echo /afi920/SPI --once
+ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 2 = CRC-64/XZ
 ```
 
 ---
@@ -160,8 +163,13 @@ ros2 topic echo /afi920/SPI --once
 | `/afi920/SHI` | `afi920_msgs/HealthInfo` | SensorDataQoS | 10 Hz |
 | `/afi920/SPI` | `afi920_msgs/SensorPerformance` | SensorDataQoS | 10 Hz |
 | `/afi920/detection_count` | `visualization_msgs/Marker` | SensorDataQoS | 10 Hz |
+| `/afi920/E2E` | `afi920_msgs/E2eStatus` | SensorDataQoS | 30 Hz (RDI + SHI + SPI) |
 
 `detection_count`는 RViz 오버레이용 `TEXT_VIEW_FACING` 마커(`Pts: <n>`)이며, `PointCloud2`와 함께 항상 발행됩니다.
+
+**DataQualifier:** DataQualifier 1(not available)과 6(직전 스캔 재송신) RDI 프레임은 새 측정값이 아니다. 이 프레임은 `PointCloud2`와 `detection_count`에서 제외하며, `RDI` 토픽에는 `data_qualifier`와 함께 발행한다.
+
+**E2E:** 수신한 RDI/SHI/SPI 메시지마다 `E2eStatus` 메시지 1건을 발행하며, `e2e_strict`로 폐기한 프레임도 포함한다. `header.stamp`는 대응하는 `PointCloud2`/`RDI`/`SHI`/`SPI` 메시지의 stamp와 같으므로 두 메시지를 시각으로 정확히 짝지을 수 있다. [§9](#afi920_msgse2estatus--메시지별-e2e-판정) 참고.
 
 **TF 브로드캐스트:** `publish_tf`가 `true`(기본값)이고 `publish_performance`가 `true`이면, 노드는 각 SPI 프레임에서 받은 센서 장착 포즈를 `/tf`(`tf2_msgs/TFMessage`)에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 브로드캐스트합니다. 고정 프레임(fixed frame)을 `parent_frame_id`로 설정하면 RViz/소비자가 각 센서의 클라우드를 보정된 위치에 배치할 수 있습니다. `publish_performance`가 `false`이면 SPI 포즈가 없으므로 TF는 브로드캐스트되지 않습니다(경고 로그 출력).
 
@@ -212,8 +220,8 @@ ros2 topic echo /afi920/SPI --once
 
 | 파라미터 | 타입 | 기본값 | 설명 |
 |---------|------|-------|------|
-| `validate_e2e` | bool | `true` | 모든 프레임에 AUTOSAR E2E CRC-64/XZ 검증 |
-| `e2e_strict` | bool | `false` | `true`이면 E2E 검증 실패 프레임 폐기 |
+| `validate_e2e` | bool | `true` | 모든 RDI/SHI/SPI 프레임의 E2E CRC 검증(인터페이스 v1.1.0 이후 CRC-32, v1.0.x CRC-64/XZ). 결과는 `E2E`로 발행하며, CRC 불일치는 로그로 남기고 프레임을 발행한다 |
+| `e2e_strict` | bool | `false` | `true`이면 E2E Length 또는 Data ID 불일치 프레임을 폐기한다. CRC 불일치로는 폐기하지 않는다 |
 
 ### 전체 런치 인자 목록 (afi920.launch.py)
 
@@ -289,8 +297,8 @@ ros2 launch afi920_driver multi_sensor.launch.py \
 | 인자 | 기본값 | 설명 |
 |------|-------|------|
 | `transport_mode` | `tcp` | `tcp` 또는 `udp` |
-| `validate_e2e` | `true` | 데이터 스트림 AUTOSAR E2E CRC 검증 |
-| `e2e_strict` | `false` | E2E 불일치 프레임 폐기 |
+| `validate_e2e` | `true` | 데이터 스트림 E2E CRC 검증(결과는 `E2E`로 발행, 폐기 없음) |
+| `e2e_strict` | `false` | E2E Length/Data ID 불일치 프레임 폐기 |
 | `parent_frame` | `base_link` | 공통 부모 TF 프레임; 각 포즈가 `parent_frame → <pos>_frame`로 브로드캐스트됨 |
 | `publish_tf` | `true` | 각 센서 장착 포즈(SPI)를 TF로 브로드캐스트 |
 | `config_file` | `""` | YAML 설정 파일 경로(개별 파라미터 대체; 예: `config/multi_sensor.yaml`) |
@@ -317,6 +325,7 @@ uint8  sensor_id
 uint32 message_counter
 uint64 timestamp_measurement_ns      # 센서 PTP 타임스탬프 (나노초)
 uint8  data_qualifier                # 0=normal 1=not_available 2=reduced_coverage 3=reduced_perf
+                                     # 4=reduced_coverage_and_perf 5=test_mode 6=invalid (재송신)
 
 float32 velocity_ambiguity_begin     # m/s  (기본: -88.89)
 float32 velocity_ambiguity_end       # m/s  (기본:  55.56)
@@ -488,6 +497,26 @@ float32 detection_range_end    # m
 float32 signal_to_noise_ratio  # dB
 ```
 
+### `afi920_msgs/E2eStatus` — 메시지별 E2E 판정
+
+```
+std_msgs/Header header        # stamp = 대응 데이터 메시지의 stamp
+                              # (data_published가 false이면 판정 시각)
+uint8  stream                 # 0=RDI  1=SHI  2=SPI
+uint8  result                 # 0=ok  1=crc_mismatch  2=crc_zero (통과 아님)  3=not_checked
+uint8  crc_format             # 0=unknown  1=CRC-32 (v1.1.0 이후)  2=CRC-64/XZ (v1.0.x)
+bool   length_ok              # E2E Length가 페이로드 크기와 같음
+bool   data_id_ok             # E2E Data ID가 스트림과 일치
+uint32 e2e_counter
+uint32 missing_before         # 직전 메시지 이후 건너뛴 E2E Counter 개수
+bool   sensor_restarted       # E2E Counter 감소
+bool   data_published         # false: e2e_strict 폐기 또는 페이로드 파싱 실패
+uint32 message_counter        # ISO 23150 MessageCounter (파싱 전 0)
+uint8  data_qualifier         # ISO 23150 DataQualifier (파싱 전 0)
+```
+
+메시지 손실은 `missing_before`로 계수한다. 인터페이스 v1.1.0 이후 센서는 재송신 시 MessageCounter를 반복하므로 MessageCounter를 손실 판정에 사용하지 않는다.
+
 ---
 
 ## 10. PointCloud2 필드 레퍼런스
@@ -581,7 +610,7 @@ python3 live_data_check.py --sdk-root /path/to/afi920-sdk
 
 ### `rdi_diag.py` — 바이트 레벨 RDI 프로토콜 디버거
 
-원시 프레임을 캡처하여 SOME/IP 프레이밍, E2E CRC, RDI 헤더/감지 필드를 검증합니다.
+원시 프레임을 캡처하여 SOME/IP 프레이밍, E2E CRC(드라이버와 같은 규칙으로 CRC-32 또는 CRC-64/XZ), RDI 헤더/감지 필드를 검증합니다.
 
 ```bash
 # UDP (기본값)
@@ -591,7 +620,7 @@ python3 rdi_diag.py --sensor-ip 192.168.10.150 --port 30509 --max-frames 5
 python3 rdi_diag.py --sensor-ip 192.168.10.150 --tcp --max-frames 5
 ```
 
-출력 내용: SOME/IP 헤더 · E2E CRC 결과 · RDI 헤더 필드 · 처음 10개 감지 데이터 및 NaN 진단
+출력 내용: SOME/IP 헤더 · E2E CRC 결과와 일치 형식 · RDI 헤더 필드 · 처음 10개 감지 데이터 및 NaN 진단
 
 ---
 
@@ -617,12 +646,24 @@ ROS 2 토픽 (sensor_msgs / afi920_msgs)
     ↑
 ISO 23150 페이로드 (바이너리, 리틀 엔디안)
     ↑
-AUTOSAR E2E Profile 7 헤더 (20B · CRC-64/XZ)
+E2E 헤더 (20B · 빅 엔디안 · CRC / Length / Counter / Data ID)
     ↑
 SOME/IP-TP 헤더 (16B + 4B TP · 빅 엔디안)
     ↑
 TCP / UDP
 ```
+
+**센서 인터페이스 호환:** 형식은 수신 프레임으로 판별하며, 형식을 지정하는 파라미터는 없다.
+
+| 항목 | 인터페이스 v1.0.x | 인터페이스 v1.1.0 이후 |
+|------|------------------|-----------------------|
+| E2E CRC 필드 (0–7 바이트) | 헤더 8–19 바이트와 페이로드 대상 CRC-64/XZ | 0–3 바이트는 0, 4–7 바이트는 페이로드 대상 IEEE 802.3 CRC-32 |
+| Config API 프레임 | SOME/IP 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON |
+| 기동 시 스트림 목적지 | `SetNetworkConfig`로 적용 | `GetNetworkConfig`로 조회. 차이는 경고로 출력하며 센서 설정을 변경하지 않는다 |
+| 메시지 손실 판정 | E2E Counter | E2E Counter |
+| `PointCloud2` 제외 프레임 | DataQualifier 1, 6 | DataQualifier 1, 6 |
+
+인터페이스 v1.1.0 이후에서 스트림 프로토콜, 포트, 목적지를 변경하려면 진단 모드 진입, `SetNetworkConfig`, 센서 재시작이 필요하다. 드라이버는 이 절차를 수행하지 않는다.
 
 **멀티 센서:** 센서는 포트가 아니라 **IP**(및 ROS 네임스페이스)로 구분됩니다.
 모든 센서는 동일한 기본 포트(30509/30510/30511)를 사용하며,
@@ -638,7 +679,10 @@ TCP / UDP
 | 노드 시작하나 토픽 없음 | `sensor_ip` 올바름? 포트 30509 접근 가능? |
 | 토픽은 있으나 메시지 없음 | `ros2 topic hz`가 0 Hz → 포트 30509–30511 방화벽 규칙 확인 |
 | `RDI` 감지 배열이 항상 비어 있음 | FoV 내 물체 있음? `min_range`/`max_range`, `min_snr` 확인 |
-| 노드 로그에 E2E 오류 | 시작 시 정상; 지속적이면 TCP로 전환 (`transport_mode:=tcp`) |
+| 노드 로그에 E2E CRC 불일치 경고 | 프레임은 계속 발행된다. `ros2 topic echo /afi920/E2E`의 `result`, `crc_format`을 확인하고, UDP에서 지속되면 TCP로 전환한다 (`transport_mode:=tcp`) |
+| `Sensor stream config differs from driver parameters` 경고 | 인터페이스 v1.1.0 이후 센서의 스트림 프로토콜 또는 포트가 다름 → `transport_mode`와 포트 파라미터를 센서에 맞추거나, 센서를 재설정한 뒤 재시작한다 |
+| Fixed Frame `base_link`에서 RViz 점군 미표시 | 센서 frame으로 가는 TF 없음 → `publish_tf`와 `publish_performance`를 `true`로 유지하거나 변환을 직접 송출한다 |
+| 센서 frame이 두 자세 사이를 오감 | 드라이버와 URDF 또는 다른 노드가 같은 변환을 송출함 → `publish_tf:=false`를 지정한다 |
 | RDI 없음, SHI/SPI 정상 | RDI 버퍼 오버런 → TCP 강제 사용 (512KB vs UDP 400KB) |
 | 멀티 센서: 토픽 누락 | 각 `<pos>_ip` 접근 가능 여부와 네임스페이스가 서로 다른지 확인 |
 | `colcon build` 실패 | `afi920_msgs` 먼저 빌드; `$ROS_DISTRO` 소싱 확인 |
@@ -652,7 +696,7 @@ TCP / UDP
 ```
 빌드     → colcon build --packages-select afi920_msgs afi920_driver
 런치     → ros2 launch afi920_driver afi920.launch.py sensor_ip:=<IP>
-토픽     → /afi920/PointCloud2  /afi920/RDI  /afi920/SHI  /afi920/SPI
+토픽     → /afi920/PointCloud2  /afi920/RDI  /afi920/SHI  /afi920/SPI  /afi920/E2E
 튜닝     → ros2 param set /afi920/afi920_driver min_range 1.0  (라이브)
 멀티센서 → ros2 launch afi920_driver multi_sensor.launch.py front_ip:=... rear_ip:=...
 검증     → python3 tools/live_data_check.py [IP] [--duration N]

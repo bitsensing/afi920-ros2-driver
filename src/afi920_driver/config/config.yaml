@@ -14,6 +14,8 @@ afi920_driver:
     shi_port: 30510               # SHII data port (TCP/UDP per transport_mode)
     spi_port: 30511               # SPI data port (TCP/UDP per transport_mode)
     frame_id: "afi920"            # TF frame ID
+    parent_frame_id: "base_link"  # Parent TF frame of the broadcast sensor pose
+    publish_tf: true              # Broadcast the SPI mounting pose as TF parent_frame_id -> frame_id
 
     # --- Filtering (runtime-adjustable via ros2 param set) ---
     min_range: 0.0                # Minimum range filter (meters)
@@ -26,8 +28,8 @@ afi920_driver:
     publish_health: true          # Publish ~/SHI HealthInfo
     publish_performance: true     # Publish ~/SPI SensorPerformance
     transport_mode: "tcp"         # Data stream transport: "tcp" or "udp"
-    validate_e2e: true            # Validate AUTOSAR E2E CRC on RDI/SHII/SPI
-    e2e_strict: false             # Drop E2E CRC/metadata mismatches when true
+    validate_e2e: true            # Validate E2E CRC on RDI/SHII/SPI (results on ~/E2E, no drop)
+    e2e_strict: false             # Drop E2E Length/Data ID mismatches when true
 
 # =============================================================================
 # Multi-Sensor Configuration

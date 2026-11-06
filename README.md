@@ -18,6 +18,7 @@ It publishes AFI920 sensor data as ROS 2 topics for integration with customer RO
 - This repository provides the **public ROS 2 driver for AFI920 customer integration**.
 - **Product manuals, interface specifications, and detailed installation/operation guides** are provided separately.
 - This README is intended as a quick reference for **build, launch, key topics/parameters, and the basic visualization flow**.
+- [AFI920_ROS2_GUIDE.md](AFI920_ROS2_GUIDE.md) is the full integration reference with every parameter, message definition, and protocol detail.
 
 ---
 
@@ -146,7 +147,10 @@ sudo apt install ros-$ROS_DISTRO-rclcpp \
                   ros-$ROS_DISTRO-rclcpp-components \
                   ros-$ROS_DISTRO-sensor-msgs \
                   ros-$ROS_DISTRO-std-msgs \
-                  ros-$ROS_DISTRO-visualization-msgs
+                  ros-$ROS_DISTRO-visualization-msgs \
+                  ros-$ROS_DISTRO-geometry-msgs \
+                  ros-$ROS_DISTRO-tf2 \
+                  ros-$ROS_DISTRO-tf2-ros
 ```
 
 ### Network Setup
@@ -189,6 +193,9 @@ Example: with the default namespace, `PointCloud2` is published as `/afi920/Poin
 | `RDI` | `afi920_msgs/DetectionArray` | 10 Hz | Full detection data |
 | `SHI` | `afi920_msgs/HealthInfo` | 10 Hz | Sensor status and health information |
 | `SPI` | `afi920_msgs/SensorPerformance` | 10 Hz | Sensor performance and pose information |
+| `E2E` | `afi920_msgs/E2eStatus` | 30 Hz | E2E verification result of each RDI/SHI/SPI message. `header.stamp` equals the stamp of the matching data message |
+
+When `publish_tf` is `true` (default), the driver also broadcasts the sensor mounting pose from each SPI message on `/tf` as the transform `parent_frame_id → frame_id` (default `base_link → afi920`). The pose is not broadcast when `publish_performance` is `false`.
 
 ## PointCloud2 Fields
 
@@ -230,6 +237,8 @@ This follows the ROS standard coordinate convention defined in [REP-103](https:/
 |-----------|------|---------|---------|-------------|
 | `sensor_ip` | string | `192.168.10.150` | No | Sensor IP address |
 | `frame_id` | string | `afi920` | Yes | TF frame ID applied to published messages |
+| `parent_frame_id` | string | `base_link` | No | Parent TF frame of the broadcast sensor pose |
+| `publish_tf` | bool | `true` | No | Broadcast the SPI mounting pose as TF `parent_frame_id → frame_id`. Requires `publish_performance` |
 | `min_range` | double | `0.0` | Yes | Minimum range filter (m) |
 | `max_range` | double | `300.0` | Yes | Maximum range filter (m) |
 | `min_snr` | double | `0.0` | Yes | Minimum SNR filter (dB) |
@@ -248,8 +257,22 @@ This follows the ROS standard coordinate convention defined in [REP-103](https:/
 | `config_port` | int | `30500` | No | Sensor configuration port |
 | `host_ip` | string | `auto` | No | Host IP address (`auto` is supported) |
 | `transport_mode` | string | `tcp` | No | Data stream transport (`tcp` or `udp`) |
-| `validate_e2e` | bool | `true` | Yes | Validate AUTOSAR E2E CRC on RDI/SHI/SPI |
-| `e2e_strict` | bool | `false` | Yes | Drop data stream frames on E2E CRC or metadata mismatch |
+| `validate_e2e` | bool | `true` | Yes | Validate the E2E CRC on RDI/SHI/SPI. Results are published on `E2E`, and frames are not dropped on CRC mismatch |
+| `e2e_strict` | bool | `false` | Yes | Drop data stream frames on E2E Length or Data ID mismatch |
+
+### Sensor Interface Compatibility
+
+The driver supports AFI920 interface v1.0.x and v1.1.0+ without extra parameters. The format is detected from the frames the sensor sends.
+
+| Item | Interface v1.0.x | Interface v1.1.0+ |
+|------|------------------|-------------------|
+| E2E CRC on RDI/SHI/SPI | CRC-64/XZ | IEEE 802.3 CRC-32 over the payload |
+| Config API frame | SOME/IP header + JSON | SOME/IP header + E2E header + JSON |
+| Stream destination at startup | Applied with `SetNetworkConfig` | Read with `GetNetworkConfig`. Differences are logged as warnings and the sensor is not changed |
+| Message loss detection | E2E Counter | E2E Counter |
+| Frames excluded from `PointCloud2` | DataQualifier 1 and 6 | DataQualifier 1 and 6 |
+
+> On interface v1.1.0+, changing the stream protocol, port, or destination requires diagnostic mode, `SetNetworkConfig`, and a sensor restart. The driver does not perform these steps. Frames excluded from `PointCloud2` are still published on `RDI` with their `data_qualifier`.
 
 Runtime update example:
 
@@ -288,15 +311,21 @@ Recommendations:
 
 - Use a unique `namespace` for each sensor.
 - Use a unique `frame_id` for each sensor.
-- Configure TF explicitly when connecting sensors to the vehicle coordinate system.
 
-### TF Example
+### TF
+
+Each node broadcasts its sensor mounting pose from SPI as `parent_frame_id → frame_id`. `multi_sensor.launch.py` sets the common parent with the `parent_frame` argument (default `base_link`), so the four clouds are placed at their mounting positions when the RViz2 Fixed Frame is `base_link`.
 
 ```bash
-ros2 run tf2_ros static_transform_publisher 3.5 0.0 0.7 0 0 0 base_link radar_front
+ros2 launch afi920_driver multi_sensor.launch.py parent_frame:=base_link
 ```
 
-> **Tip:** Matching `frame_id` and the TF child frame name simplifies visualization and downstream processing.
+If the vehicle URDF or another node already publishes the sensor frames, set `publish_tf:=false` and publish the transform yourself. Two publishers of the same transform produce conflicting TF.
+
+```bash
+ros2 launch afi920_driver afi920.launch.py namespace:=radar_front frame_id:=radar_front publish_tf:=false
+ros2 run tf2_ros static_transform_publisher 3.5 0.0 0.7 0 0 0 base_link radar_front
+```
 
 ---
 
@@ -312,7 +341,9 @@ AFI920 Sensor
    ├─ PointCloud2
    ├─ RDI
    ├─ SHI
-   └─ SPI
+   ├─ SPI
+   ├─ E2E
+   └─ /tf (sensor pose)
           │
           ▼
    RViz2 / ROS 2 Applications
@@ -328,7 +359,13 @@ The fastest way to check the output is to visualize the `PointCloud2` topic in R
 
 1. Run `rviz2`
 2. Select **Add** → **By topic** → `/afi920/PointCloud2`
-3. Set **Fixed Frame** to `afi920` or your configured `frame_id`
+3. Set **Fixed Frame** to `afi920` or your configured `frame_id`. With `publish_tf:=true`, `base_link` also works and places the cloud at the mounting pose
+
+The package installs ready-made RViz2 configurations. `./run.sh` opens `afi920.rviz`, and `./run.sh --multi` opens `multi_sensor.rviz` (Fixed Frame `base_link`, the four `/radar_<pos>/PointCloud2` topics).
+
+```bash
+rviz2 -d $(ros2 pkg prefix afi920_driver)/share/afi920_driver/config/multi_sensor.rviz
+```
 
 Recommended starting settings:
 
@@ -353,7 +390,10 @@ Color examples:
 | PointCloud2 contains zero points | Filters are too restrictive | Check `min_range`, `min_snr`, and `min_existence_probability` |
 | Build or launch fails | ROS 2 environment or dependency issue | Run `source /opt/ros/$ROS_DISTRO/setup.bash` and then retry `rosdep install` |
 | Packet loss or intermittent data | Network buffer or NIC issue | Check NIC settings and system receive buffer settings |
+| `Sensor stream config differs from driver parameters` warning | The sensor (interface v1.1.0+) uses a different stream protocol or port | Match `transport_mode` and the port parameters to the sensor, or reconfigure the sensor and restart it |
 | Multi-sensor topics overlap | Duplicate namespace or frame_id | Use unique `namespace` and `frame_id` values per sensor |
+| RViz2 shows no cloud with Fixed Frame `base_link` | No TF from `base_link` to the sensor frame | Keep `publish_tf` and `publish_performance` at `true`, or publish the transform yourself |
+| Sensor frame jumps between two poses | The driver and another node publish the same transform | Set `publish_tf:=false` on the driver |
 
 ---
 
