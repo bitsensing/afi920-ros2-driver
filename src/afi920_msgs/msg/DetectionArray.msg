@@ -10,8 +10,9 @@ uint8 data_qualifier                   # 0=normal, 1=not_available, 2=reduced_co
 
 # Ambiguity domains. Current RDI wire payload carries velocity ambiguity only;
 # the remaining fields are retained for ROS API compatibility and default to 0.
-float32 velocity_ambiguity_begin       # m/s (default: -88.89)
-float32 velocity_ambiguity_end         # m/s (default: 55.56)
+float32 velocity_ambiguity_begin       # m/s, computed per scan by the sensor (-17.21 to -12.05)
+float32 velocity_ambiguity_end         # m/s, computed per scan by the sensor (12.05 to 17.21)
+                                       # Detection.radial_velocity is resolved and can lie outside this domain.
 float32 range_ambiguity_begin          # meters (default: 0)
 float32 range_ambiguity_end            # meters (default: 300)
 float32 azimuth_ambiguity_begin        # radians (default: -1.0472)

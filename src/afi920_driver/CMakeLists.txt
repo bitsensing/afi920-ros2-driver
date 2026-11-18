@@ -45,6 +45,7 @@ add_library(afi920_driver_lib SHARED
   src/e2e.cpp
   src/someip_parser.cpp
   src/rdi_parser.cpp
+  src/rdi_assembler.cpp
   src/shi_parser.cpp
   src/spi_parser.cpp
 )
@@ -117,6 +118,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_rdi_parser test/test_rdi_parser.cpp)
   target_link_libraries(test_rdi_parser afi920_driver_lib)
   ament_target_dependencies(test_rdi_parser ${DEPENDENCIES})
+
+  ament_add_gtest(test_rdi_assembler test/test_rdi_assembler.cpp)
+  target_link_libraries(test_rdi_assembler afi920_driver_lib)
+  ament_target_dependencies(test_rdi_assembler ${DEPENDENCIES})
 
   ament_add_gtest(test_shi_parser test/test_shi_parser.cpp)
   target_link_libraries(test_shi_parser afi920_driver_lib)

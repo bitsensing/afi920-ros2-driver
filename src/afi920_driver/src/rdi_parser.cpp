@@ -18,8 +18,44 @@ int RdiParser::Parse(const uint8_t* payload, size_t len, RdiFrame& frame)
     }
 
     auto& msg = frame.message;
-    const uint8_t* p = payload;
+    ParseDetectionHeader(payload, msg);
 
+    if (msg.num_detections > kRdiMaxDetections) {
+        msg.num_detections = static_cast<uint16_t>(kRdiMaxDetections);
+    }
+
+    const size_t expected = kRdiHeaderSize +
+        static_cast<size_t>(msg.num_detections) * kRdiDetectionSize;
+    if (len < expected) {
+        msg.num_detections = static_cast<uint16_t>(
+            (len - kRdiHeaderSize) / kRdiDetectionSize);
+    }
+
+    frame.detections_storage.resize(msg.num_detections);
+    for (uint16_t i = 0; i < msg.num_detections; i++) {
+        const uint8_t* det_ptr = payload + kRdiHeaderSize + i * kRdiDetectionSize;
+        ParseDetection(det_ptr, frame.detections_storage[i]);
+    }
+
+    msg.detections = frame.detections_storage.data();
+
+    return 0;
+}
+
+int RdiParser::ParseHeaderMessage(const uint8_t* body, size_t len,
+                                  bts_rdi_message_t& msg, RdiListLayout& layout)
+{
+    if (!body || len != BTS_RDI_HEADER_MSG_SIZE) {
+        return -1;
+    }
+    ParseDetectionHeader(body, msg);
+    layout.entities_per_chunk = detail::unpack_le16(body + kRdiHeaderSize);
+    layout.chunk_count = detail::unpack_le16(body + kRdiHeaderSize + 2);
+    return 0;
+}
+
+void RdiParser::ParseDetectionHeader(const uint8_t* p, bts_rdi_message_t& msg)
+{
     // Common Interface Header (24 bytes)
     msg.interface_version.major = p[0];
     msg.interface_version.minor = p[1];
@@ -50,30 +86,9 @@ int RdiParser::Parse(const uint8_t* payload, size_t len, RdiFrame& frame)
     msg.recognised_detections_capability = detail::unpack_le16(p + 32);
     msg.recognised_detections_status = 0;
     msg.num_detections = detail::unpack_le16(p + 34);
-
-    if (msg.num_detections > kRdiMaxDetections) {
-        msg.num_detections = static_cast<uint16_t>(kRdiMaxDetections);
-    }
-
-    const size_t expected = kRdiHeaderSize +
-        static_cast<size_t>(msg.num_detections) * kRdiDetectionSize;
-    if (len < expected) {
-        msg.num_detections = static_cast<uint16_t>(
-            (len - kRdiHeaderSize) / kRdiDetectionSize);
-    }
-
-    frame.detections_storage.resize(msg.num_detections);
-    for (uint16_t i = 0; i < msg.num_detections; i++) {
-        const uint8_t* det_ptr = payload + kRdiHeaderSize + i * kRdiDetectionSize;
-        ParseDetection(det_ptr, frame.detections_storage[i]);
-    }
-
-    msg.detections = frame.detections_storage.data();
-
-    return 0;
 }
 
-int RdiParser::ParseDetection(const uint8_t* d, bts_rdi_detection_t& det)
+void RdiParser::ParseDetection(const uint8_t* d, bts_rdi_detection_t& det)
 {
     std::memset(&det, 0, sizeof(det));
 
@@ -99,8 +114,6 @@ int RdiParser::ParseDetection(const uint8_t* d, bts_rdi_detection_t& det)
     // Dynamics (8 bytes)
     det.relative_velocity_radial = detail::unpack_le_f32(d + 43);
     det.relative_velocity_radial_error = detail::unpack_le_f32(d + 47);
-
-    return 0;
 }
 
 }  // namespace afi920_driver

@@ -27,6 +27,21 @@
 
 namespace afi920_driver {
 
+namespace {
+
+// RDI UDP receive timeout. The v1.2.0 scan timeout (100 ms) is checked after
+// each receive, so the receive must return well within it without traffic.
+constexpr int kRdiUdpTimeoutMs = 20;
+
+uint64_t steady_now_ns()
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+}  // namespace
+
 Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     : rclcpp::Node("afi920_driver", options)
 {
@@ -78,6 +93,7 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     pc_config.min_snr = min_snr_;
     pc_config.min_existence_probability = min_existence_probability_;
     pc_builder_ = std::make_unique<PointCloudBuilder>(pc_config);
+    rdi_scan_emit_ = [this](RdiScan& scan) { on_rdi_scan(scan); };
 
     // --- Configure sensor stream destination ---
     configure_sensor_streams();
@@ -91,7 +107,8 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
         spi_receiver_ = std::make_unique<TcpStreamClient>(
             sensor_ip_, static_cast<uint16_t>(spi_port_), 4 * 1024);
     } else {
-        rdi_receiver_ = std::make_unique<UdpReceiver>(static_cast<uint16_t>(data_port_));
+        rdi_receiver_ = std::make_unique<UdpReceiver>(
+            static_cast<uint16_t>(data_port_), 16 * 1024 * 1024, kRdiUdpTimeoutMs);
         shi_receiver_ = std::make_unique<UdpReceiver>(static_cast<uint16_t>(shi_port_));
         spi_receiver_ = std::make_unique<UdpReceiver>(static_cast<uint16_t>(spi_port_));
     }
@@ -276,12 +293,15 @@ void Afi920Node::rdi_thread_func()
 
     while (running_.load()) {
         int n = rdi_receiver_->Receive(buf.data(), buf_size);
-        if (n <= 0) continue;
-        recv_count++;
-        if (recv_count <= 3 || recv_count % 100 == 0) {
-            RCLCPP_INFO(get_logger(), "RDI recv #%u: %d bytes", recv_count, n);
+        if (n > 0) {
+            recv_count++;
+            if (recv_count <= 3 || recv_count % 1000 == 0) {
+                RCLCPP_INFO(get_logger(), "RDI recv #%u: %d bytes", recv_count, n);
+            }
+            process_rdi_datagram(buf.data(), static_cast<size_t>(n));
         }
-        process_rdi_datagram(buf.data(), static_cast<size_t>(n));
+        // Close a v1.2.0 scan whose header B never came (Interface Overview §3.2.3).
+        rdi_assembler_.Poll(steady_now_ns(), rdi_scan_emit_);
     }
 
     RCLCPP_INFO(get_logger(), "RDI thread stopped");
@@ -457,7 +477,7 @@ void Afi920Node::publish_e2e_status(uint8_t stream, const E2eVerdict& verdict,
     pub_e2e_->publish(std::move(st));
 }
 
-void Afi920Node::deliver_rdi_frame(RdiFrame& frame, const E2eVerdict& verdict)
+void Afi920Node::count_rdi_loss(const E2eVerdict& verdict)
 {
     const uint32_t total = total_packets_.fetch_add(1) + 1;
     const uint32_t missing = verdict.counter.missing;
@@ -468,8 +488,92 @@ void Afi920Node::deliver_rdi_frame(RdiFrame& frame, const E2eVerdict& verdict)
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
             "Packet loss: %u lost, %u received (%.1f%%)", lost, total, loss_pct);
     }
+}
 
+void Afi920Node::deliver_rdi_frame(RdiFrame& frame, const E2eVerdict& verdict)
+{
+    count_rdi_loss(verdict);
     on_rdi_frame(frame, verdict);
+}
+
+void Afi920Node::process_rdi_chunked(const uint8_t* data, size_t len, const SomeipHeader& hdr)
+{
+    using afi920_msgs::msg::E2eStatus;
+    if (!rdi_chunked_seen_) {
+        rdi_chunked_seen_ = true;
+        RCLCPP_INFO(get_logger(),
+            "RDI framing detected: interface v1.2.0 header/chunk messages");
+    }
+
+    // Each header and chunk message carries its own E2E header, whose Data ID
+    // is 0x6000 << 16 | Event ID (0x60008002 or 0x60008100 + k).
+    const uint8_t* payload = data + kSomeipHeaderSize;
+    size_t payload_len = len - kSomeipHeaderSize;
+    E2eVerdict verdict;
+    if (!consume_e2e_header(payload, payload_len, e2e_data_id(hdr.method_id), "RDI", verdict)) {
+        // A message dropped by e2e_strict is reported on its own.
+        publish_e2e_status(E2eStatus::STREAM_RDI, verdict, this->now(), false, 0, 0);
+        return;
+    }
+
+    RdiMessageE2e e2e;
+    e2e.status = verdict.status;
+    e2e.format = verdict.header.format;
+    e2e.length_ok = verdict.length_ok;
+    e2e.data_id_ok = verdict.data_id_ok;
+    const uint32_t counter = verdict.header.counter;
+    const uint64_t now_ns = steady_now_ns();
+    if (hdr.method_id == kEventRdi) {
+        rdi_assembler_.OnHeader(counter, e2e, payload, payload_len, now_ns, rdi_scan_emit_);
+    } else {
+        rdi_assembler_.OnChunk(counter, e2e,
+                               static_cast<uint16_t>(hdr.method_id - kEventRdiChunkBase),
+                               payload, payload_len, now_ns, rdi_scan_emit_);
+    }
+}
+
+void Afi920Node::on_rdi_scan(RdiScan& scan)
+{
+    using afi920_msgs::msg::E2eStatus;
+    E2eVerdict verdict;
+    verdict.header.counter = scan.e2e_counter;
+    verdict.header.format = scan.e2e.format;
+    verdict.status = scan.e2e.status;
+    verdict.parsed = true;
+    verdict.checked = validate_e2e_.load(std::memory_order_relaxed);
+    verdict.length_ok = scan.e2e.length_ok;
+    verdict.data_id_ok = scan.e2e.data_id_ok;
+    // All messages of a scan share one E2E Counter, so loss is counted per scan.
+    track_e2e_counter(rdi_counter_, "RDI", verdict);
+
+    if (scan.chunks_rejected > 0) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "RDI scan (E2E counter %u): %u chunk(s) rejected for size, MessageCounter "
+            "or ChunkCount mismatch", static_cast<unsigned int>(scan.e2e_counter),
+            static_cast<unsigned int>(scan.chunks_rejected));
+    }
+    if (!scan.has_header) {
+        count_rdi_loss(verdict);
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "RDI scan (E2E counter %u) dropped: no header message received",
+            static_cast<unsigned int>(scan.e2e_counter));
+        publish_e2e_status(E2eStatus::STREAM_RDI, verdict, this->now(), false, 0, 0);
+        return;
+    }
+    if (!scan.IsComplete()) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
+            "RDI scan (E2E counter %u) partial: %u of %u chunks, %u of %u detections",
+            static_cast<unsigned int>(scan.e2e_counter),
+            static_cast<unsigned int>(scan.chunks_received),
+            static_cast<unsigned int>(scan.chunk_count),
+            static_cast<unsigned int>(scan.frame.message.num_detections),
+            static_cast<unsigned int>(scan.announced_detections));
+    }
+
+    RdiFrame& frame = scan.frame;
+    frame.recv_timestamp_ns = steady_now_ns();
+    frame.frame_seq = rdi_frame_seq_.fetch_add(1);
+    deliver_rdi_frame(frame, verdict);
 }
 
 void Afi920Node::process_rdi_datagram(const uint8_t* data, size_t len)
@@ -492,6 +596,23 @@ void Afi920Node::process_rdi_datagram(const uint8_t* data, size_t len)
 
     if (!someip_validate(hdr)) { return; }
 
+    // Interface v1.2.0: header A, chunks and header B, each a single datagram.
+    if (hdr.interface_version == kSomeipInterfaceVersionRdiChunked) {
+        if (someip_is_tp(hdr.message_type) ||
+            (hdr.method_id != kEventRdi && !someip_is_rdi_chunk_event(hdr.method_id))) {
+            if (rdi_diag_count_ <= 5) {
+                RCLCPP_WARN(get_logger(),
+                    "[DIAG #%u] Ignoring RDI message: interface_version=0x02 method=0x%04X type=0x%02X",
+                    rdi_diag_count_, hdr.method_id, hdr.message_type);
+            }
+            return;
+        }
+        process_rdi_chunked(data, len, hdr);
+        return;
+    }
+
+    // Interface v1.0.x and v1.1.0: one Event 0x8002 message per scan, split
+    // by SOME/IP-TP over UDP.
     if (hdr.method_id != kEventRdi) {
         if (diag) {
             RCLCPP_WARN(get_logger(),
@@ -570,9 +691,7 @@ void Afi920Node::process_rdi_datagram(const uint8_t* data, size_t len)
     }
 
     RdiFrame frame{};
-    frame.recv_timestamp_ns = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
+    frame.recv_timestamp_ns = steady_now_ns();
     frame.frame_seq = rdi_frame_seq_.fetch_add(1);
 
     int parse_rc = rdi_parser_.Parse(payload, payload_len, frame);

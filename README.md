@@ -262,17 +262,21 @@ This follows the ROS standard coordinate convention defined in [REP-103](https:/
 
 ### Sensor Interface Compatibility
 
-The driver supports AFI920 interface v1.0.x and v1.1.0+ without extra parameters. The format is detected from the frames the sensor sends.
+The driver supports AFI920 interface v1.0.x, v1.1.0 and v1.2.0 without extra parameters. The format is detected from the frames the sensor sends.
 
-| Item | Interface v1.0.x | Interface v1.1.0+ |
-|------|------------------|-------------------|
-| E2E CRC on RDI/SHI/SPI | CRC-64/XZ | IEEE 802.3 CRC-32 over the payload |
-| Config API frame | SOME/IP header + JSON | SOME/IP header + E2E header + JSON |
-| Stream destination at startup | Applied with `SetNetworkConfig` | Read with `GetNetworkConfig`. Differences are logged as warnings and the sensor is not changed |
-| Message loss detection | E2E Counter | E2E Counter |
-| Frames excluded from `PointCloud2` | DataQualifier 1 and 6 | DataQualifier 1 and 6 |
+| Item | Interface v1.0.x | Interface v1.1.0 | Interface v1.2.0 |
+|------|------------------|------------------|------------------|
+| E2E CRC on RDI/SHI/SPI | CRC-64/XZ | IEEE 802.3 CRC-32 over the payload | IEEE 802.3 CRC-32 over the payload |
+| RDI framing | One message per scan (SOME/IP-TP over UDP) | One message per scan (SOME/IP-TP over UDP) | Header A, chunk messages (Event `0x8100`+k) and header B per scan, each with its own E2E header and no SOME/IP-TP |
+| `E2E` topic for RDI | One per message | One per message | One per scan (worst result of its messages) |
+| Config API frame | SOME/IP header + JSON | SOME/IP header + E2E header + JSON | SOME/IP header + E2E header + JSON |
+| Stream destination at startup | Applied with `SetNetworkConfig` | Read with `GetNetworkConfig`. Differences are logged as warnings and the sensor is not changed | Same as v1.1.0 |
+| Message loss detection | E2E Counter | E2E Counter | E2E Counter (one value per scan) |
+| Frames excluded from `PointCloud2` | DataQualifier 1 and 6 | DataQualifier 1 and 6 | DataQualifier 1 and 6 |
 
 > On interface v1.1.0+, changing the stream protocol, port, or destination requires diagnostic mode, `SetNetworkConfig`, and a sensor restart. The driver does not perform these steps. Frames excluded from `PointCloud2` are still published on `RDI` with their `data_qualifier`.
+>
+> On interface v1.2.0, a scan with missing chunk messages is published with the detections that arrived and logged as a partial scan. A scan without any header message is not published; its result is still published on `E2E` with `data_published` false.
 
 Runtime update example:
 
@@ -391,6 +395,8 @@ Color examples:
 | Build or launch fails | ROS 2 environment or dependency issue | Run `source /opt/ros/$ROS_DISTRO/setup.bash` and then retry `rosdep install` |
 | Packet loss or intermittent data | Network buffer or NIC issue | Check NIC settings and system receive buffer settings |
 | `Sensor stream config differs from driver parameters` warning | The sensor (interface v1.1.0+) uses a different stream protocol or port | Match `transport_mode` and the port parameters to the sensor, or reconfigure the sensor and restart it |
+| No `PointCloud2`/`RDI` while `SHI` and `SPI` arrive | `SHI` `operation_modes[0]` is 100 (Fault Mode): the sensor sends no RDI in this boot | Check the sensor calibration record and restart the sensor |
+| `RDI scan ... partial` warning | Interface v1.2.0 chunk messages were lost (UDP) | The scan is published with the detections that arrived. Persistent warnings over UDP → use `transport_mode:=tcp` |
 | Multi-sensor topics overlap | Duplicate namespace or frame_id | Use unique `namespace` and `frame_id` values per sensor |
 | RViz2 shows no cloud with Fixed Frame `base_link` | No TF from `base_link` to the sensor frame | Keep `publish_tf` and `publish_performance` at `true`, or publish the transform yourself |
 | Sensor frame jumps between two poses | The driver and another node publish the same transform | Set `publish_tf:=false` on the driver |

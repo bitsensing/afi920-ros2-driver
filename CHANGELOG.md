@@ -6,6 +6,19 @@ All notable changes to the AFI920 ROS 2 Driver will be documented in this file.
 
 ## v2.2.0
 
+### Sensor Interface v1.2.0 Compatibility
+
+The driver receives interface v1.2.0 sensors next to v1.0.x and v1.1.0, following AFI920 SDK v2.2.0. The RDI framing is detected from received frames, and no new parameter is required. Existing topics, message types and parameters are unchanged.
+
+- **RDI header/chunk messages** — A v1.2.0 scan arrives as header A (Event `0x8002`), chunk messages (Events `0x8100`–`0x814B`) and header B, marked by SOME/IP Interface Version `0x02`, each with its own E2E header (Data ID `0x60008002` for the headers, `0x60008100`+k for chunk k) and no SOME/IP-TP. The driver assembles them by E2E Counter into one `PointCloud2` and one `RDI` message per scan, following Interface Overview §3.2.3: late messages of the last two closed scans are ignored, and a scan closes on completion, on header B, on another E2E Counter or 100 ms after its first message.
+- **Partial scans** — A scan with missing chunk messages is published with the detections that arrived and logged as `partial`. A chunk whose size, MessageCounter or index does not match the header is rejected and logged. A scan without any header message is not published.
+- **E2E topic** — On v1.2.0 one `E2eStatus` is published per RDI scan with the worst result of its messages. A message dropped by `e2e_strict` is reported on its own with `data_published` false, as is a scan without a header message. `E2eStatus.msg` gains comments only.
+- **Loss detection** — The RDI E2E Counter is tracked once per scan.
+- **RDI UDP receive timeout** — 20 ms, so the 100 ms scan timeout holds when the sensor stops sending.
+- **rdi_diag.py** — Assembles v1.2.0 scans with the same rules and prints the chunk count, rejected chunks and messages that failed the E2E check.
+- **Logging** — The `RDI recv` progress line is printed every 1000 datagrams instead of every 100.
+- **RDI field values** — The message comments and the guides follow the interface v1.2.0 field definitions. The driver passes the values through unchanged. `velocity_ambiguity_begin` / `velocity_ambiguity_end` are computed per scan by the sensor (−17.21 to −12.05 m/s and 12.05 to 17.21 m/s), and `radial_velocity` is the resolved velocity, which can lie outside that domain. `existence_probability` is 1 to 100 (90–100 real, 70–89 suspected ghost, 50–69 likely ghost, 1–49 ghost; 98, 97, 95 and 93 mark range, angle, range and angle, and velocity shape-estimation points). `ambiguity_grouping_id` is always 0.
+
 ### Sensor Interface v1.1.0 Compatibility
 
 The driver works with sensors on interface v1.0.x and v1.1.0+. The format is detected from received frames, and no new parameter is required.

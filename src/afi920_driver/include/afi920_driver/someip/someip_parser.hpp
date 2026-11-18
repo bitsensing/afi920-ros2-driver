@@ -5,7 +5,9 @@
  *
  * SOME/IP header: 16 bytes, big-endian.
  * TP header: 4 bytes after SOME/IP header when TP flag is set.
- * TP reassembly: needed for RDI frames with >~26 detections (>1392 bytes).
+ * TP reassembly: needed for single-message RDI frames (interface v1.0.x and
+ * v1.1.0) with >~26 detections (>1392 bytes). Interface v1.2.0 RDI header and
+ * chunk messages fit one datagram each and do not use TP.
  */
 #pragma once
 
@@ -24,10 +26,20 @@ static constexpr uint8_t  kSomeipTpFlag              = 0x20;
 static constexpr uint16_t kSomeipServiceId           = 0x6000;
 static constexpr uint8_t  kSomeipMsgTypeNotification = 0x02;
 
+// Interface v1.2.0 RDI header/chunk messages; every other message carries 0x01.
+static constexpr uint8_t  kSomeipInterfaceVersionRdiChunked = 0x02;
+
 // Event IDs for data streams
-static constexpr uint16_t kEventRdi     = 0x8002;
+static constexpr uint16_t kEventRdi     = 0x8002;  // v1.2.0: header A and header B
 static constexpr uint16_t kEventShii    = 0x8003;
 static constexpr uint16_t kEventSpi     = 0x8004;
+static constexpr uint16_t kEventRdiChunkBase = 0x8100;  // v1.2.0: chunk k = base + k
+static constexpr uint16_t kRdiMaxChunks      = 76;      // k = 0..75 (0x8100~0x814B)
+
+inline bool someip_is_rdi_chunk_event(uint16_t method_id) {
+    return method_id >= kEventRdiChunkBase &&
+           method_id < kEventRdiChunkBase + kRdiMaxChunks;
+}
 
 // ─── SOME/IP Header ───
 

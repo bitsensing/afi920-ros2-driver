@@ -38,7 +38,7 @@ AFI920 ROS 2 드라이버는 AFI920 SDK를 컴포저블 ROS 2 노드로 래핑�
 
 이 외에도 RViz 오버레이용 `~/detection_count` 마커와 RDI/SHI/SPI 메시지별 E2E 판정 결과 `~/E2E`를 발행하고, SPI에서 받은 센서 장착 포즈를 `parent_frame_id → frame_id` TF 변환으로 브로드캐스트합니다. [§6](#6-발행-토픽) 참고.
 
-모든 데이터 토픽은 `SensorDataQoS`를 사용합니다. TCP(기본값) 및 UDP 전송, 센서 인터페이스 v1.0.x와 v1.1.0 이후의 E2E CRC 검증(수신 프레임으로 형식 판별, 파라미터 없음), SOME/IP-TP 세그먼트 재조립, 센서 포즈 TF 브로드캐스트, `ros2 param set`을 통한 런타임 필터 조정을 지원합니다.
+모든 데이터 토픽은 `SensorDataQoS`를 사용합니다. TCP(기본값) 및 UDP 전송, 센서 인터페이스 v1.0.x와 v1.1.0 이후의 E2E CRC 검증(수신 프레임으로 형식 판별, 파라미터 없음), SOME/IP-TP 세그먼트 재조립, 인터페이스 v1.2.0 RDI 헤더·묶음 메시지의 스캔 조립, 센서 포즈 TF 브로드캐스트, `ros2 param set`을 통한 런타임 필터 조정을 지원합니다.
 
 ---
 
@@ -327,8 +327,9 @@ uint64 timestamp_measurement_ns      # 센서 PTP 타임스탬프 (나노초)
 uint8  data_qualifier                # 0=normal 1=not_available 2=reduced_coverage 3=reduced_perf
                                      # 4=reduced_coverage_and_perf 5=test_mode 6=invalid (재송신)
 
-float32 velocity_ambiguity_begin     # m/s  (기본: -88.89)
-float32 velocity_ambiguity_end       # m/s  (기본:  55.56)
+float32 velocity_ambiguity_begin     # m/s, 센서가 스캔마다 산출 (-17.21 ~ -12.05)
+float32 velocity_ambiguity_end       # m/s, 센서가 스캔마다 산출 (12.05 ~ 17.21);
+                                     # Detection.radial_velocity는 해소된 속도이며 이 범위를 벗어날 수 있다
 float32 range_ambiguity_begin        # m    (기본:   0.0)
 float32 range_ambiguity_end          # m    (기본: 300.0)
 float32 azimuth_ambiguity_begin      # rad  (기본: -1.0472, ≈ -60°)
@@ -347,7 +348,8 @@ afi920_msgs/Detection[] detections
 # 식별
 uint16  detection_id
 uint16  object_id_reference    # 예약, 0xFFFF = 추적 없음
-uint8   existence_probability  # 0–100 %
+uint8   existence_probability  # 1–100 %: 90–100 실검출, 70–89 고스트 의심, 50–69 고스트 가능성 높음,
+                               # 1–49 고스트. 98/97/95/93은 거리/각도/거리+각도/속도 형상추정점
 float32 timestamp_difference   # 헤더 타임스탬프 기준 오프셋 (s)
 
 # 위치 (구면 좌표, 센서 수신값)
@@ -375,7 +377,7 @@ float32 snr_error              # dB
 
 # 확률
 uint8   multi_target_probability        # 0–100 %
-uint16  ambiguity_grouping_id
+uint16  ambiguity_grouping_id           # 항상 0 (미지원)
 uint8   detection_ambiguity_probability # 예약
 uint8   free_space_probability          # 예약
 
@@ -517,6 +519,8 @@ uint8  data_qualifier         # ISO 23150 DataQualifier (파싱 전 0)
 
 메시지 손실은 `missing_before`로 계수한다. 인터페이스 v1.1.0 이후 센서는 재송신 시 MessageCounter를 반복하므로 MessageCounter를 손실 판정에 사용하지 않는다.
 
+인터페이스 v1.2.0에서는 한 스캔의 헤더와 묶음 메시지가 E2E Counter 하나를 공유하므로 `E2eStatus`를 RDI 스캔당 1건 발행한다. `result`는 구성 메시지 판정 중 최악 값(CRC 불일치, CRC 0, 정상 순)이며, 검사에 실패한 메시지가 하나라도 있으면 `length_ok`와 `data_id_ok`는 false이다. `e2e_strict`로 폐기한 메시지는 `data_published`가 false인 개별 메시지로 발행한다. 헤더 메시지를 하나도 받지 못한 스캔은 `data_published`가 false이고 `message_counter`가 0인 메시지로 발행한다.
+
 ---
 
 ## 10. PointCloud2 필드 레퍼런스
@@ -538,7 +542,7 @@ uint8  data_qualifier         # ISO 23150 DataQualifier (파싱 전 0)
 | 11 | `azimuth_angle_error` | rad | |
 | 12 | `elevation_angle_error` | rad | |
 | 13 | `radial_velocity_error` | m/s | |
-| 14 | `existence_probability` | % | 0–100 감지 신뢰도 |
+| 14 | `existence_probability` | % | 1–100 감지 신뢰도 (90–100 실검출, 98·97·95·93은 형상추정점) |
 | 15 | `multi_target_probability` | % | 0–100 |
 | 16 | `detection_id` | — | 프레임 내 고유 ID |
 | 17 | `sensor_id` | — | 소스 센서 식별자 |
@@ -629,7 +633,7 @@ python3 rdi_diag.py --sensor-ip 192.168.10.150 --tcp --max-frames 5
 | 포트 | 프로토콜 | 방향 | 용도 |
 |-----|---------|------|------|
 | 30500 | TCP | ↔ | Config API (센서 IP, 스트림 목적지) |
-| 30509 | TCP/UDP | ← | RDI — 포인트 클라우드 (Event ID `0x8002`) |
+| 30509 | TCP/UDP | ← | RDI — 포인트 클라우드 (Event ID `0x8002`, 인터페이스 v1.2.0은 묶음 Event `0x8100`–`0x814B` 추가) |
 | 30510 | TCP/UDP | ← | SHII — 상태 정보 (Event ID `0x8003`) |
 | 30511 | TCP/UDP | ← | SPI — 성능 정보 (Event ID `0x8004`) |
 
@@ -648,22 +652,38 @@ ISO 23150 페이로드 (바이너리, 리틀 엔디안)
     ↑
 E2E 헤더 (20B · 빅 엔디안 · CRC / Length / Counter / Data ID)
     ↑
-SOME/IP-TP 헤더 (16B + 4B TP · 빅 엔디안)
+SOME/IP 헤더 (16B · 빅 엔디안, 분할된 단일 메시지 RDI는 4B TP 헤더 추가)
     ↑
 TCP / UDP
 ```
 
 **센서 인터페이스 호환:** 형식은 수신 프레임으로 판별하며, 형식을 지정하는 파라미터는 없다.
 
-| 항목 | 인터페이스 v1.0.x | 인터페이스 v1.1.0 이후 |
-|------|------------------|-----------------------|
-| E2E CRC 필드 (0–7 바이트) | 헤더 8–19 바이트와 페이로드 대상 CRC-64/XZ | 0–3 바이트는 0, 4–7 바이트는 페이로드 대상 IEEE 802.3 CRC-32 |
-| Config API 프레임 | SOME/IP 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON |
-| 기동 시 스트림 목적지 | `SetNetworkConfig`로 적용 | `GetNetworkConfig`로 조회. 차이는 경고로 출력하며 센서 설정을 변경하지 않는다 |
-| 메시지 손실 판정 | E2E Counter | E2E Counter |
-| `PointCloud2` 제외 프레임 | DataQualifier 1, 6 | DataQualifier 1, 6 |
+| 항목 | 인터페이스 v1.0.x | 인터페이스 v1.1.0 | 인터페이스 v1.2.0 |
+|------|------------------|------------------|------------------|
+| E2E CRC 필드 (0–7 바이트) | 헤더 8–19 바이트와 페이로드 대상 CRC-64/XZ | 0–3 바이트는 0, 4–7 바이트는 페이로드 대상 IEEE 802.3 CRC-32 | v1.1.0과 같다 |
+| RDI 프레이밍 | 스캔당 Event `0x8002` 메시지 1건, UDP는 SOME/IP-TP 분할 | v1.0.x와 같다 | SOME/IP Interface Version `0x02`: 헤더 A(`0x8002`), 묶음 k(`0x8100`+k, k = 0–75), 헤더 B(`0x8002`). SOME/IP-TP를 쓰지 않는다 |
+| RDI E2E Data ID | `0x60008002` | `0x60008002` | 헤더 2건은 `0x60008002`, 묶음 k는 `0x60008100`+k |
+| Config API 프레임 | SOME/IP 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON | v1.1.0과 같다 |
+| 기동 시 스트림 목적지 | `SetNetworkConfig`로 적용 | `GetNetworkConfig`로 조회. 차이는 경고로 출력하며 센서 설정을 변경하지 않는다 | v1.1.0과 같다 |
+| 메시지 손실 판정 | E2E Counter | E2E Counter | E2E Counter (한 스캔의 메시지가 공유) |
+| `PointCloud2` 제외 프레임 | DataQualifier 1, 6 | DataQualifier 1, 6 | DataQualifier 1, 6 (헤더 메시지 기준) |
 
 인터페이스 v1.1.0 이후에서 스트림 프로토콜, 포트, 목적지를 변경하려면 진단 모드 진입, `SetNetworkConfig`, 센서 재시작이 필요하다. 드라이버는 이 절차를 수행하지 않는다.
+
+**인터페이스 v1.2.0 RDI 스캔 조립** (Interface Overview §3.2.3):
+
+| 규칙 | 드라이버 동작 |
+|------|--------------|
+| 헤더 본문 | Detection Header(36B) + List Layout(EntitiesPerChunk u16, ChunkCount u16) |
+| 묶음 본문 | Chunk Header(MessageCounter u32, FirstEntityIndex u16, EntityCount u16) + EntityCount × 51B 검출 |
+| 스캔 키 | E2E Counter. 다른 E2E Counter의 메시지를 받으면 열린 스캔을 닫는다 |
+| 헤더 A / 헤더 B | 스캔의 첫 `0x8002`는 헤더 A, 두 번째는 헤더 B이다. E2E 검사를 통과한 헤더 사본을 우선 사용한다 |
+| 스캔 종료 | 헤더 1건과 ChunkCount건의 묶음 수신, 헤더 B 수신, 다른 E2E Counter 수신, 첫 메시지 후 100 ms 경과 중 먼저 오는 시점 |
+| 늦은 메시지 | 직전에 닫힌 스캔 2건의 메시지는 버린다 |
+| 묶음 검사 | 크기가 EntityCount와 맞지 않거나, MessageCounter가 헤더와 다르거나, 인덱스가 ChunkCount 이상인 묶음은 제외하고 로그를 출력한다 |
+| 부분 스캔 | 수신한 검출을 묶음 순서대로 `PointCloud2`와 `RDI`로 발행하고 `partial` 경고를 출력한다 |
+| 헤더 없는 스캔 | `PointCloud2`와 `RDI`로 발행하지 않으며, `data_published`가 false인 `E2E` 메시지로 보고한다 |
 
 **멀티 센서:** 센서는 포트가 아니라 **IP**(및 ROS 네임스페이스)로 구분됩니다.
 모든 센서는 동일한 기본 포트(30509/30510/30511)를 사용하며,
@@ -683,7 +703,8 @@ TCP / UDP
 | `Sensor stream config differs from driver parameters` 경고 | 인터페이스 v1.1.0 이후 센서의 스트림 프로토콜 또는 포트가 다름 → `transport_mode`와 포트 파라미터를 센서에 맞추거나, 센서를 재설정한 뒤 재시작한다 |
 | Fixed Frame `base_link`에서 RViz 점군 미표시 | 센서 frame으로 가는 TF 없음 → `publish_tf`와 `publish_performance`를 `true`로 유지하거나 변환을 직접 송출한다 |
 | 센서 frame이 두 자세 사이를 오감 | 드라이버와 URDF 또는 다른 노드가 같은 변환을 송출함 → `publish_tf:=false`를 지정한다 |
-| RDI 없음, SHI/SPI 정상 | RDI 버퍼 오버런 → TCP 강제 사용 (512KB vs UDP 400KB) |
+| RDI 없음, SHI/SPI 정상 | `SHI`의 `operation_modes[0]`이 100(Fault Mode)이면 센서는 이 부팅에서 RDI를 송신하지 않는다 → Calibration record를 점검하고 센서를 재시작한다. 그 외에는 RDI 버퍼 오버런 → TCP 강제 사용 (512KB vs UDP 400KB) |
+| `RDI scan ... partial` 경고 | 인터페이스 v1.2.0 묶음 메시지가 UDP에서 손실됨 → 스캔은 수신한 검출만으로 발행된다. 경고가 지속되면 `transport_mode:=tcp`를 사용한다 |
 | 멀티 센서: 토픽 누락 | 각 `<pos>_ip` 접근 가능 여부와 네임스페이스가 서로 다른지 확인 |
 | `colcon build` 실패 | `afi920_msgs` 먼저 빌드; `$ROS_DISTRO` 소싱 확인 |
 | `host_ip:=auto`가 잘못된 NIC 선택 | `host_ip:=192.168.10.100`으로 명시 지정 |

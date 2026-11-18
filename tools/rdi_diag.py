@@ -14,6 +14,18 @@ DET_SIZE = 51
 SERVICE_ID = 0x6000
 EVENT_RDI = 0x8002
 E2E_DATA_ID_RDI = 0x60008002
+# Interface v1.2.0: header A / chunk k (Event 0x8100 + k) / header B, each a
+# single SOME/IP message with Interface Version 0x02 and its own E2E header.
+IFACE_VER_RDI_CHUNKED = 0x02
+EVENT_RDI_CHUNK_BASE = 0x8100
+RDI_MAX_CHUNKS = 76
+RDI_HDR_MSG = RDI_HDR + 4
+CHUNK_HDR = 8
+
+
+def is_rdi_event(method_id):
+    return method_id == EVENT_RDI or (
+        EVENT_RDI_CHUNK_BASE <= method_id < EVENT_RDI_CHUNK_BASE + RDI_MAX_CHUNKS)
 
 
 def crc64_xz(data):
@@ -35,6 +47,7 @@ def parse_someip(data):
         "method_id": msg_id & 0xFFFF,
         "length": length,
         "session_id": req_id & 0xFFFF,
+        "iface": data[13],
         "message_type": data[14],
         "is_tp": (data[14] & 0x20) != 0,
     }
@@ -45,7 +58,7 @@ def parse_tp(data, off):
     return (raw >> 4) * 16, (raw & 1) != 0
 
 
-def consume_e2e(payload):
+def consume_e2e(payload, expected_data_id=E2E_DATA_ID_RDI):
     if len(payload) < E2E_HDR:
         return None, {"error": f"short E2E header: {len(payload)}B"}
     e2e = {
@@ -72,7 +85,8 @@ def consume_e2e(payload):
                 e2e["crc_format"] = "CRC-64/XZ"
     e2e["crc_ok"] = e2e["crc_format"] is not None
     e2e["length_ok"] = (e2e["length"] == len(payload) - E2E_HDR)
-    e2e["data_id_ok"] = (e2e["data_id"] == E2E_DATA_ID_RDI)
+    e2e["expected_data_id"] = expected_data_id
+    e2e["data_id_ok"] = (e2e["data_id"] == expected_data_id)
     return payload[E2E_HDR:], e2e
 
 
@@ -103,6 +117,86 @@ class TpReasm:
         self.buf = bytearray()
         self.sid = None
         self.n = 0
+
+
+class ScanAsm:
+    """Interface v1.2.0 scan assembly (Interface Overview §3.2.3), as the driver does it.
+
+    A scan closes on header B, when one header and ChunkCount chunks are in, or
+    on a message of another E2E Counter. Messages of the last two closed scans
+    are late and ignored.
+    """
+
+    def __init__(self):
+        self.closed = []
+        self.reset()
+
+    def reset(self):
+        self.counter = None
+        self.someip = None
+        self.header = None
+        self.header_e2e = None
+        self.headers_seen = 0
+        self.chunks = {}
+        self.e2e_bad = 0
+
+    def feed(self, hdr, payload):
+        """Return a list of closed scans (0, 1 or 2 entries)."""
+        out = []
+        body, e2e = consume_e2e(payload, SERVICE_ID << 16 | hdr["method_id"])
+        if body is None:
+            return out
+        counter = e2e["counter"]
+        if counter in self.closed:
+            return out
+        if self.counter is not None and counter != self.counter:
+            out.append(self.close())
+        if self.counter is None:
+            self.counter = counter
+        if not (e2e["crc_ok"] and e2e["length_ok"] and e2e["data_id_ok"]):
+            self.e2e_bad += 1
+        if hdr["method_id"] == EVENT_RDI:
+            self.headers_seen += 1
+            if self.header is None:
+                self.someip, self.header, self.header_e2e = hdr, body, e2e
+            if self.headers_seen >= 2 or self.complete():
+                out.append(self.close())
+        else:
+            self.chunks.setdefault(hdr["method_id"] - EVENT_RDI_CHUNK_BASE, body)
+            if self.complete():
+                out.append(self.close())
+        return out
+
+    def chunk_count(self):
+        if self.header is None or len(self.header) != RDI_HDR_MSG:
+            return None
+        return struct.unpack_from("<H", self.header, RDI_HDR + 2)[0]
+
+    def complete(self):
+        k = self.chunk_count()
+        return k is not None and all(i in self.chunks for i in range(k))
+
+    def close(self):
+        """Build a single-message equivalent payload: Detection Header + detections."""
+        self.closed = ([self.counter] + self.closed)[:2]
+        k = self.chunk_count()
+        scan = {"counter": self.counter, "someip": self.someip, "e2e": self.header_e2e,
+                "chunk_count": k, "chunks": len(self.chunks), "e2e_bad": self.e2e_bad,
+                "payload": None, "rejected": 0}
+        if k is not None:
+            mc = struct.unpack_from("<I", self.header, 14)[0]
+            dets = b""
+            for i in sorted(self.chunks):
+                c = self.chunks[i]
+                n = struct.unpack_from("<H", c, 6)[0] if len(c) >= CHUNK_HDR else 0
+                if (i >= k or len(c) != CHUNK_HDR + n * DET_SIZE
+                        or struct.unpack_from("<I", c, 0)[0] != mc):
+                    scan["rejected"] += 1
+                    continue
+                dets += c[CHUNK_HDR:]
+            scan["payload"] = self.header[:RDI_HDR] + dets
+        self.reset()
+        return scan
 
 
 def parse_rdi_hdr(p):
@@ -157,13 +251,23 @@ def ff(v, unit=""):
     return f"{v:.4f}{unit}"
 
 
-def show(fnum, hdr, rh, payload, e2e=None, tpn=None):
+def show(fnum, hdr, rh, payload, e2e=None, tpn=None, scan=None):
     print(f'\n{"=" * 72}\n FRAME #{fnum}\n{"=" * 72}')
-    tp = f" (TP, {tpn} segs)" if tpn else " (non-TP)"
+    if scan is not None:
+        tp = " (v1.2.0 header/chunk)"
+    else:
+        tp = f" (TP, {tpn} segs)" if tpn else " (non-TP)"
     print(
         f'  SOMEIP: svc=0x{hdr["service_id"]:04X} '
-        f'method=0x{hdr["method_id"]:04X} type=0x{hdr["message_type"]:02X}{tp}'
+        f'method=0x{hdr["method_id"]:04X} iface=0x{hdr["iface"]:02X} '
+        f'type=0x{hdr["message_type"]:02X}{tp}'
     )
+    if scan is not None:
+        print(
+            f'  SCAN: e2e_counter={scan["counter"]} chunks={scan["chunks"]}/{scan["chunk_count"]} '
+            f'rejected={scan["rejected"]} e2e_failed_messages={scan["e2e_bad"]}'
+        )
+        print("  (E2E line below is the header message used)")
     if e2e:
         if "error" in e2e:
             print(f'  \033[91mE2E: {e2e["error"]}\033[0m')
@@ -184,7 +288,7 @@ def show(fnum, hdr, rh, payload, e2e=None, tpn=None):
         if not e2e["length_ok"]:
             print(f'       \033[93mlength mismatch: actual={len(payload)}\033[0m')
         if not e2e["data_id_ok"]:
-            print(f'       \033[93mdata_id mismatch: expected=0x{E2E_DATA_ID_RDI:08X}\033[0m')
+            print(f'       \033[93mdata_id mismatch: expected=0x{e2e["expected_data_id"]:08X}\033[0m')
     print(f"  ISO payload: {len(payload)} bytes")
     if rh is None:
         print("  \033[91mRDI HEADER PARSE FAILED\033[0m")
@@ -252,6 +356,43 @@ def handle_payload(fc, hdr, payload, tpn=None):
     show(fc, hdr, parse_rdi_hdr(iso) if iso is not None else None, iso, e2e=e2e, tpn=tpn)
 
 
+def handle_scan(fc, scan):
+    if scan["payload"] is None:
+        print(f'\n{"=" * 72}\n FRAME #{fc}\n{"=" * 72}')
+        print(f'  \033[91mSCAN e2e_counter={scan["counter"]}: no header message, '
+              f'{scan["chunks"]} chunk(s) dropped\033[0m')
+        return
+    show(fc, scan["someip"], parse_rdi_hdr(scan["payload"]), scan["payload"],
+         e2e=scan["e2e"], scan=scan)
+
+
+def dispatch(pkt, hdr, ra, asm, fc):
+    """Handle one RDI SOME/IP message; return the updated frame count."""
+    off = SOMEIP_HDR
+    if hdr["iface"] == IFACE_VER_RDI_CHUNKED and not hdr["is_tp"]:
+        for scan in asm.feed(hdr, pkt[off:]):
+            fc += 1
+            handle_scan(fc, scan)
+        return fc
+    if hdr["method_id"] != EVENT_RDI:
+        return fc
+    if hdr["is_tp"]:
+        tpo, tpm = parse_tp(pkt, off)
+        off += TP_HDR
+        seg = pkt[off:]
+        if ra.n == 0:
+            print(f'  TP seg: offset={tpo} more={tpm} len={len(seg)} sid={hdr["session_id"]}')
+        payload, tn = ra.feed(seg, tpo, tpm, hdr["session_id"])
+        if payload is None:
+            return fc
+        fc += 1
+        handle_payload(fc, hdr, payload, tpn=tn)
+    else:
+        fc += 1
+        handle_payload(fc, hdr, pkt[off:])
+    return fc
+
+
 def run_udp(port, maxf):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -259,6 +400,7 @@ def run_udp(port, maxf):
     sock.settimeout(10)
     print(f"Listening UDP:{port} ...\n")
     ra = TpReasm()
+    asm = ScanAsm()
     fc = 0
     while fc < maxf:
         try:
@@ -267,23 +409,9 @@ def run_udp(port, maxf):
             print("Timeout. No data received.")
             break
         hdr = parse_someip(data)
-        if hdr is None or hdr["service_id"] != SERVICE_ID or hdr["method_id"] != EVENT_RDI:
+        if hdr is None or hdr["service_id"] != SERVICE_ID or not is_rdi_event(hdr["method_id"]):
             continue
-        off = SOMEIP_HDR
-        if hdr["is_tp"]:
-            tpo, tpm = parse_tp(data, off)
-            off += TP_HDR
-            seg = data[off:]
-            if ra.n == 0:
-                print(f'  TP seg: offset={tpo} more={tpm} len={len(seg)} sid={hdr["session_id"]}')
-            payload, tn = ra.feed(seg, tpo, tpm, hdr["session_id"])
-            if payload is None:
-                continue
-            fc += 1
-            handle_payload(fc, hdr, payload, tpn=tn)
-        else:
-            fc += 1
-            handle_payload(fc, hdr, data[off:])
+        fc = dispatch(data, hdr, ra, asm, fc)
     sock.close()
     print(f"\nDone. {fc} frames.")
 
@@ -301,6 +429,7 @@ def run_tcp(ip, port, maxf):
     buf = b""
     fc = 0
     ra = TpReasm()
+    asm = ScanAsm()
     while fc < maxf:
         try:
             chunk = sock.recv(65535)
@@ -320,20 +449,9 @@ def run_tcp(ip, port, maxf):
                 break
             pkt = buf[:tlen]
             buf = buf[tlen:]
-            if hdr["service_id"] != SERVICE_ID or hdr["method_id"] != EVENT_RDI:
+            if hdr["service_id"] != SERVICE_ID or not is_rdi_event(hdr["method_id"]):
                 continue
-            off = SOMEIP_HDR
-            if hdr["is_tp"]:
-                tpo, tpm = parse_tp(pkt, off)
-                off += TP_HDR
-                payload, tn = ra.feed(pkt[off:], tpo, tpm, hdr["session_id"])
-                if payload is None:
-                    continue
-                fc += 1
-                handle_payload(fc, hdr, payload, tpn=tn)
-            else:
-                fc += 1
-                handle_payload(fc, hdr, pkt[off:])
+            fc = dispatch(pkt, hdr, ra, asm, fc)
             if fc >= maxf:
                 break
     sock.close()

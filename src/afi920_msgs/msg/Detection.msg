@@ -6,7 +6,8 @@
 # Identification
 uint16 detection_id
 uint16 object_id_reference             # ObjectIDReference (reserved, 0xFFFF = no tracking)
-uint8 existence_probability            # 0-100 %
+uint8 existence_probability            # 1-100 % (90-100 real, 70-89 suspected ghost, 50-69 likely ghost, 1-49 ghost;
+                                       # 98/97/95/93 = range/angle/range+angle/velocity shape-estimation points)
 float32 timestamp_difference           # seconds offset from header timestamp
 
 # Position (spherical, as received from sensor)
@@ -34,7 +35,7 @@ float32 snr_error                      # dB
 
 # Probabilities
 uint8 multi_target_probability         # 0-100 %
-uint16 ambiguity_grouping_id           # ambiguity group ID
+uint16 ambiguity_grouping_id           # ambiguity group ID (always 0: not supported)
 uint8 detection_ambiguity_probability  # reserved
 uint8 free_space_probability           # reserved
 

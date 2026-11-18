@@ -238,17 +238,21 @@ PointCloud2의 Cartesian 좌표 `(x, y, z)`는 sensor frame 기준 **FLU** `(X f
 
 ### 센서 인터페이스 호환
 
-드라이버는 AFI920 인터페이스 v1.0.x와 v1.1.0 이후를 별도 파라미터 없이 지원한다. 형식은 센서가 송신한 프레임으로 판별한다.
+드라이버는 AFI920 인터페이스 v1.0.x, v1.1.0, v1.2.0을 별도 파라미터 없이 지원한다. 형식은 센서가 송신한 프레임으로 판별한다.
 
-| 항목 | 인터페이스 v1.0.x | 인터페이스 v1.1.0 이후 |
-|------|------------------|-----------------------|
-| RDI/SHI/SPI E2E CRC | CRC-64/XZ | 본문 대상 IEEE 802.3 CRC-32 |
-| Config API 프레임 | SOME/IP 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON |
-| 기동 시 스트림 목적지 | `SetNetworkConfig`로 적용 | `GetNetworkConfig`로 조회. 차이는 경고로 출력하며 센서 설정을 변경하지 않는다 |
-| 메시지 손실 판정 | E2E Counter | E2E Counter |
-| `PointCloud2` 제외 프레임 | DataQualifier 1, 6 | DataQualifier 1, 6 |
+| 항목 | 인터페이스 v1.0.x | 인터페이스 v1.1.0 | 인터페이스 v1.2.0 |
+|------|------------------|------------------|------------------|
+| RDI/SHI/SPI E2E CRC | CRC-64/XZ | 본문 대상 IEEE 802.3 CRC-32 | 본문 대상 IEEE 802.3 CRC-32 |
+| RDI 프레이밍 | 스캔당 메시지 1건 (UDP는 SOME/IP-TP 분할) | 스캔당 메시지 1건 (UDP는 SOME/IP-TP 분할) | 스캔당 헤더 A, 묶음 메시지(Event `0x8100`+k), 헤더 B. 메시지마다 E2E 헤더를 두며 SOME/IP-TP를 쓰지 않는다 |
+| RDI의 `E2E` 토픽 | 메시지당 1건 | 메시지당 1건 | 스캔당 1건 (구성 메시지 중 최악 판정) |
+| Config API 프레임 | SOME/IP 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON | SOME/IP 헤더 + E2E 헤더 + JSON |
+| 기동 시 스트림 목적지 | `SetNetworkConfig`로 적용 | `GetNetworkConfig`로 조회. 차이는 경고로 출력하며 센서 설정을 변경하지 않는다 | v1.1.0과 같다 |
+| 메시지 손실 판정 | E2E Counter | E2E Counter | E2E Counter (스캔당 1개 값) |
+| `PointCloud2` 제외 프레임 | DataQualifier 1, 6 | DataQualifier 1, 6 | DataQualifier 1, 6 |
 
 > 인터페이스 v1.1.0 이후에서 스트림 프로토콜, 포트, 목적지를 변경하려면 진단 모드 진입, `SetNetworkConfig`, 센서 재시작이 필요하다. 드라이버는 이 절차를 수행하지 않는다. `PointCloud2`에서 제외된 프레임도 `RDI` 토픽에는 `data_qualifier`와 함께 발행한다.
+>
+> 인터페이스 v1.2.0에서 묶음 메시지가 누락된 스캔은 수신한 검출만으로 발행하며 부분 스캔 경고를 출력한다. 헤더 메시지를 하나도 받지 못한 스캔은 발행하지 않으며, 그 판정은 `data_published`가 false인 `E2E` 메시지로 발행한다.
 
 런타임 변경 예시:
 
@@ -367,6 +371,8 @@ rviz2 -d $(ros2 pkg prefix afi920_driver)/share/afi920_driver/config/multi_senso
 | 빌드 또는 launch 실패 | ROS 2 환경 또는 의존성 문제 | `source /opt/ros/$ROS_DISTRO/setup.bash` 후 `rosdep install`을 다시 실행하세요 |
 | 패킷 손실 또는 데이터 끊김 | 네트워크 버퍼 또는 NIC 환경 문제 | NIC 설정과 시스템 수신 버퍼를 점검하세요 |
 | `Sensor stream config differs from driver parameters` 경고 | 센서(인터페이스 v1.1.0 이후)의 스트림 프로토콜 또는 포트가 다름 | `transport_mode`와 포트 파라미터를 센서 설정에 맞추거나, 센서를 재설정한 뒤 재시작한다 |
+| `SHI`와 `SPI`는 수신되나 `PointCloud2`/`RDI`가 없음 | `SHI`의 `operation_modes[0]`이 100(Fault Mode)이며, 센서는 이 부팅에서 RDI를 송신하지 않는다 | 센서 Calibration record를 점검하고 센서를 재시작한다 |
+| `RDI scan ... partial` 경고 | 인터페이스 v1.2.0 묶음 메시지 손실 (UDP) | 스캔은 수신한 검출만으로 발행된다. UDP에서 경고가 지속되면 `transport_mode:=tcp`를 사용한다 |
 | 멀티센서 토픽이 섞임 | namespace 또는 frame_id 중복 | 센서별로 고유한 `namespace`, `frame_id`를 사용하세요 |
 | Fixed Frame `base_link`에서 점군이 표시되지 않음 | `base_link`에서 센서 frame으로 가는 TF가 없음 | `publish_tf`와 `publish_performance`를 `true`로 유지하거나 변환을 직접 송출한다 |
 | 센서 frame이 두 자세 사이를 오감 | 드라이버와 다른 노드가 같은 변환을 송출함 | 드라이버에 `publish_tf:=false`를 지정한다 |

@@ -38,7 +38,7 @@ The AFI920 ROS 2 driver wraps the AFI920 SDK into a composable ROS 2 node. It co
 
 In addition, it publishes a `~/detection_count` RViz overlay marker, the E2E verification result of every RDI/SHI/SPI message on `~/E2E`, and broadcasts the sensor mounting pose (from SPI) as a TF transform `parent_frame_id → frame_id`. See [§6](#6-published-topics).
 
-All data topics use `SensorDataQoS`. The driver supports TCP (default) and UDP transport, E2E CRC verification for sensor interface v1.0.x and v1.1.0+ (detected from received frames, no parameter), SOME/IP-TP segment reassembly, TF broadcast of the sensor pose, and runtime filter adjustment via `ros2 param set`.
+All data topics use `SensorDataQoS`. The driver supports TCP (default) and UDP transport, E2E CRC verification for sensor interface v1.0.x and v1.1.0+ (detected from received frames, no parameter), SOME/IP-TP segment reassembly, interface v1.2.0 RDI scan assembly from header and chunk messages, TF broadcast of the sensor pose, and runtime filter adjustment via `ros2 param set`.
 
 ---
 
@@ -327,8 +327,9 @@ uint64 timestamp_measurement_ns      # sensor PTP timestamp (ns)
 uint8  data_qualifier                # 0=normal 1=not_available 2=reduced_coverage 3=reduced_perf
                                      # 4=reduced_coverage_and_perf 5=test_mode 6=invalid (resend)
 
-float32 velocity_ambiguity_begin     # m/s  (default: -88.89)
-float32 velocity_ambiguity_end       # m/s  (default:  55.56)
+float32 velocity_ambiguity_begin     # m/s, computed per scan (-17.21 to -12.05)
+float32 velocity_ambiguity_end       # m/s, computed per scan (12.05 to 17.21);
+                                     # Detection.radial_velocity is resolved and can lie outside it
 float32 range_ambiguity_begin        # m    (default:   0.0)
 float32 range_ambiguity_end          # m    (default: 300.0)
 float32 azimuth_ambiguity_begin      # rad  (default: -1.0472,  ≈ -60°)
@@ -347,7 +348,8 @@ afi920_msgs/Detection[] detections
 # Identification
 uint16  detection_id
 uint16  object_id_reference    # reserved, 0xFFFF = no tracking
-uint8   existence_probability  # 0–100 %
+uint8   existence_probability  # 1–100 %: 90–100 real, 70–89 suspected ghost, 50–69 likely ghost,
+                               # 1–49 ghost; 98/97/95/93 = range/angle/range+angle/velocity shape-estimation points
 float32 timestamp_difference   # s offset from header timestamp
 
 # Position (spherical, as received from sensor)
@@ -375,7 +377,7 @@ float32 snr_error              # dB
 
 # Probabilities
 uint8   multi_target_probability        # 0–100 %
-uint16  ambiguity_grouping_id
+uint16  ambiguity_grouping_id           # always 0 (not supported)
 uint8   detection_ambiguity_probability # reserved
 uint8   free_space_probability          # reserved
 
@@ -518,6 +520,8 @@ uint8  data_qualifier         # ISO 23150 DataQualifier (0 when not parsed)
 
 Message loss is counted from `missing_before`. MessageCounter is not used for loss detection because interface v1.1.0+ repeats it on resend.
 
+On interface v1.2.0 one `E2eStatus` is published per RDI scan, because all header and chunk messages of a scan share one E2E Counter. `result` is the worst result of those messages (CRC mismatch, then CRC zero, then OK), and `length_ok` / `data_id_ok` are false when any message failed the check. A message dropped by `e2e_strict` is reported on its own with `data_published` false. A scan without any header message is reported with `data_published` false and `message_counter` 0.
+
 ---
 
 ## 10. PointCloud2 Field Reference
@@ -539,7 +543,7 @@ Message loss is counted from `missing_before`. MessageCounter is not used for lo
 | 11 | `azimuth_angle_error` | rad | |
 | 12 | `elevation_angle_error` | rad | |
 | 13 | `radial_velocity_error` | m/s | |
-| 14 | `existence_probability` | % | 0–100 detection confidence |
+| 14 | `existence_probability` | % | 1–100 detection confidence (90–100 real; 98, 97, 95, 93 mark shape-estimation points) |
 | 15 | `multi_target_probability` | % | 0–100 |
 | 16 | `detection_id` | — | Per-frame unique ID |
 | 17 | `sensor_id` | — | Identifies the source sensor |
@@ -630,7 +634,7 @@ Output includes: SOME/IP header, E2E CRC result and matched format, RDI header f
 | Port | Proto | Direction | Purpose |
 |------|-------|-----------|---------|
 | 30500 | TCP | ↔ | Config API (sensor IP, stream destination) |
-| 30509 | TCP/UDP | ← | RDI — point cloud (Event ID `0x8002`) |
+| 30509 | TCP/UDP | ← | RDI — point cloud (Event ID `0x8002`; interface v1.2.0 adds chunk Events `0x8100`–`0x814B`) |
 | 30510 | TCP/UDP | ← | SHII — health info (Event ID `0x8003`) |
 | 30511 | TCP/UDP | ← | SPI — performance info (Event ID `0x8004`) |
 
@@ -649,22 +653,38 @@ ISO 23150 payload (binary, little-endian)
     ↑
 E2E header (20 B · big-endian · CRC / Length / Counter / Data ID)
     ↑
-SOME/IP-TP header (16 B + 4 B TP · big-endian)
+SOME/IP header (16 B · big-endian; + 4 B TP header on segmented single-message RDI)
     ↑
 TCP / UDP
 ```
 
 **Sensor interface compatibility:** the format is detected from received frames; no parameter selects it.
 
-| Item | Interface v1.0.x | Interface v1.1.0+ |
-|------|------------------|-------------------|
-| E2E CRC field (bytes 0–7) | CRC-64/XZ over header bytes 8–19 and the payload | bytes 0–3 = 0, bytes 4–7 = IEEE 802.3 CRC-32 over the payload |
-| Config API frame | SOME/IP header + JSON | SOME/IP header + E2E header + JSON |
-| Stream destination at startup | Applied with `SetNetworkConfig` | Read with `GetNetworkConfig`; differences are logged and the sensor is not changed |
-| Message loss detection | E2E Counter | E2E Counter |
-| Frames excluded from `PointCloud2` | DataQualifier 1 and 6 | DataQualifier 1 and 6 |
+| Item | Interface v1.0.x | Interface v1.1.0 | Interface v1.2.0 |
+|------|------------------|------------------|------------------|
+| E2E CRC field (bytes 0–7) | CRC-64/XZ over header bytes 8–19 and the payload | bytes 0–3 = 0, bytes 4–7 = IEEE 802.3 CRC-32 over the payload | Same as v1.1.0 |
+| RDI framing | One Event `0x8002` message per scan, SOME/IP-TP over UDP | Same as v1.0.x | SOME/IP Interface Version `0x02`: header A (`0x8002`), chunk k (`0x8100`+k, k = 0–75), header B (`0x8002`); no SOME/IP-TP |
+| RDI E2E Data ID | `0x60008002` | `0x60008002` | `0x60008002` for both headers, `0x60008100`+k for chunk k |
+| Config API frame | SOME/IP header + JSON | SOME/IP header + E2E header + JSON | Same as v1.1.0 |
+| Stream destination at startup | Applied with `SetNetworkConfig` | Read with `GetNetworkConfig`; differences are logged and the sensor is not changed | Same as v1.1.0 |
+| Message loss detection | E2E Counter | E2E Counter | E2E Counter (shared by all messages of a scan) |
+| Frames excluded from `PointCloud2` | DataQualifier 1 and 6 | DataQualifier 1 and 6 | DataQualifier 1 and 6 (from the header message) |
 
 On interface v1.1.0+, changing the stream protocol, port, or destination requires diagnostic mode, `SetNetworkConfig`, and a sensor restart. The driver does not perform these steps.
+
+**Interface v1.2.0 RDI scan assembly** (Interface Overview §3.2.3):
+
+| Rule | Driver behavior |
+|------|-----------------|
+| Header body | Detection Header (36 B) + List Layout (EntitiesPerChunk u16, ChunkCount u16) |
+| Chunk body | Chunk Header (MessageCounter u32, FirstEntityIndex u16, EntityCount u16) + EntityCount × 51 B detections |
+| Scan key | E2E Counter. A message with another E2E Counter closes the open scan |
+| Header A / header B | The first `0x8002` of a scan is header A, the second header B. A header copy that passed the E2E check is preferred |
+| Scan close | One header and ChunkCount chunks received, header B received, another E2E Counter received, or 100 ms after the first message |
+| Late message | A message of one of the last two closed scans is ignored |
+| Chunk check | A chunk whose size does not match EntityCount, whose MessageCounter differs from the header, or whose index is not below ChunkCount is rejected and logged |
+| Partial scan | Published on `PointCloud2` and `RDI` with the detections that arrived, in chunk order; a `partial` warning is logged |
+| Scan without header | Not published on `PointCloud2` or `RDI`; reported on `E2E` with `data_published` false |
 
 **Multi-sensor:** each sensor is distinguished by its **IP** (and ROS namespace),
 not by port. All sensors use the same default ports (30509/30510/30511);
@@ -684,7 +704,8 @@ not by port. All sensors use the same default ports (30509/30510/30511);
 | `Sensor stream config differs from driver parameters` warning | Interface v1.1.0+ sensor uses another stream protocol or port → match `transport_mode` and port parameters to the sensor, or reconfigure and restart the sensor |
 | No cloud in RViz with Fixed Frame `base_link` | No TF to the sensor frame → keep `publish_tf` and `publish_performance` at `true`, or publish the transform yourself |
 | Sensor frame jumps between two poses | Driver and URDF/another node publish the same transform → set `publish_tf:=false` |
-| RDI missing, SHI/SPI fine | RDI buffer overrun → force TCP (512 KB buffer vs 400 KB UDP) |
+| RDI missing, SHI/SPI fine | `SHI` `operation_modes[0]` = 100 (Fault Mode) → the sensor sends no RDI in this boot; check the calibration record and restart the sensor. Otherwise RDI buffer overrun → force TCP (512 KB buffer vs 400 KB UDP) |
+| `RDI scan ... partial` warning | Interface v1.2.0 chunk messages lost over UDP → the scan is published with the detections that arrived; persistent warnings → `transport_mode:=tcp` |
 | Multi-sensor: topics missing | Verify each `<pos>_ip` is reachable and namespaces differ |
 | `colcon build` fails | Build `afi920_msgs` first; check `$ROS_DISTRO` is sourced |
 | `host_ip:=auto` picks wrong NIC | Set `host_ip:=192.168.10.100` explicitly |

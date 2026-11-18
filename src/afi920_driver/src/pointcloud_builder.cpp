@@ -15,7 +15,7 @@
  *   signal_noise_ratio                — dB
  *   radial_distance_error, azimuth_angle_error,
  *   elevation_angle_error, radial_velocity_error — variances
- *   existence_probability             — 0-100 (as float)
+ *   existence_probability             — 1-100 (as float)
  *   multi_target_probability          — 0-100 (as float)
  *   detection_id                      — ID (as float)
  *   sensor_id                         — ID (as float)

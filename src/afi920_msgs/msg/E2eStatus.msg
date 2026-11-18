@@ -3,6 +3,9 @@
 # message published from the same sensor message, so the two can be paired
 # by exact time. When data_published is false no data message was published
 # and header.stamp is the verification time.
+# On sensor interface v1.2.0 one message is published per RDI scan (header and
+# chunk messages share one E2E Counter): result is the worst result of those
+# messages and length_ok / data_id_ok are false when any of them failed.
 std_msgs/Header header
 
 uint8 STREAM_RDI=0

@@ -37,6 +37,12 @@ static constexpr uint32_t kE2eDataIdRdi = 0x60008002u;
 static constexpr uint32_t kE2eDataIdShii = 0x60008003u;
 static constexpr uint32_t kE2eDataIdSpi = 0x60008004u;
 
+/// Data ID of an Event: 0x6000 << 16 | Event ID. The v1.2.0 RDI chunk k uses
+/// e2e_data_id(0x8100 + k).
+inline uint32_t e2e_data_id(uint16_t event_id) {
+    return kE2eDataIdServiceBase | event_id;
+}
+
 /// CRC format that matched the frame (kUnknown when no format matched).
 enum class E2eCrcFormat : uint8_t {
     kUnknown = 0,

@@ -32,6 +32,27 @@ extern "C" {
 #define BTS_RDI_MAX_PAYLOAD_SIZE        (BTS_RDI_HEADER_SIZE + BTS_RDI_DETECTION_SIZE * BTS_RDI_MAX_DETECTIONS)
 
 /*============================================================================
+ * Header / chunk messages (interface v1.2.0, SOME/IP Interface Version 0x02)
+ *
+ * One scan is header A (Event 0x8002), chunk k (Event 0x8100 + k) for
+ * k = 0..K-1 and header B (Event 0x8002 again), all under one E2E Counter.
+ * Each message has its own E2E header (Data ID 0x60008002 for both headers,
+ * 0x60008100 + k for chunk k) and SOME/IP-TP is not used.
+ *   header body = Detection Header (36B) + List Layout (4B)
+ *   chunk body  = Chunk Header (8B) + Detection x EntityCount
+ * List Layout:  EntitiesPerChunk (u16, offset 36), ChunkCount (u16, offset 38)
+ * Chunk Header: MessageCounter (u32), FirstEntityIndex (u16), EntityCount (u16)
+ *============================================================================*/
+
+#define BTS_RDI_LIST_LAYOUT_SIZE        (4u)
+#define BTS_RDI_HEADER_MSG_SIZE         (BTS_RDI_HEADER_SIZE + BTS_RDI_LIST_LAYOUT_SIZE)    /* 40 */
+#define BTS_RDI_CHUNK_HEADER_SIZE       (8u)
+#define BTS_RDI_ENTITIES_PER_CHUNK      (27u)
+#define BTS_RDI_MAX_CHUNK_SIZE \
+    (BTS_RDI_CHUNK_HEADER_SIZE + BTS_RDI_DETECTION_SIZE * BTS_RDI_ENTITIES_PER_CHUNK)  /* 1385 */
+#define BTS_RDI_MAX_CHUNKS              (76u)   /* Event 0x8100~0x814B */
+
+/*============================================================================
  * Detection Classification Types
  *============================================================================*/
 
@@ -52,7 +73,7 @@ typedef enum {
 
 typedef struct {
     /* Status */
-    uint8_t  existence_probability;         /* 0-100 % */
+    uint8_t  existence_probability;         /* 1-100 % */
     uint16_t detection_id;
     uint16_t object_id_reference;
     float    timestamp_difference;          /* seconds */

@@ -4,9 +4,10 @@
  * @brief ROS2 node for AFI920 4D Imaging Radar
  *
  * Handles UDP reception, SOME/IP parsing, and payload deserialization
- * directly — no external SDK dependency. Interface v1.0.x and v1.1.0+
- * sensors are both supported; the E2E CRC and Config API formats are
- * detected from the received frames.
+ * directly — no external SDK dependency. Interface v1.0.x, v1.1.0 and
+ * v1.2.0 sensors are supported; the E2E CRC, the RDI framing (single message
+ * or v1.2.0 header/chunk messages) and the Config API format are detected
+ * from the received frames.
  *
  * Published topics (all relative, namespace-prefixed):
  *   ~/PointCloud2  sensor_msgs/PointCloud2       (18 FLOAT32 fields)
@@ -43,6 +44,7 @@
 #include "afi920_driver/transport/udp_receiver.hpp"
 #include "afi920_driver/someip/e2e.hpp"
 #include "afi920_driver/someip/someip_parser.hpp"
+#include "afi920_driver/parsers/rdi_assembler.hpp"
 #include "afi920_driver/parsers/rdi_parser.hpp"
 #include "afi920_driver/parsers/shi_parser.hpp"
 #include "afi920_driver/parsers/spi_parser.hpp"
@@ -94,6 +96,8 @@ private:
 
     // --- Protocol ---
     SomeipTpReassembler rdi_tp_;
+    RdiScanAssembler rdi_assembler_;   // v1.2.0 header/chunk messages, RDI thread only
+    RdiScanAssembler::Emit rdi_scan_emit_;
     RdiParser rdi_parser_;
     ShiParser shi_parser_;
     SpiParser spi_parser_;
@@ -130,6 +134,7 @@ private:
 
     // --- Diagnostics ---
     uint32_t rdi_diag_count_{0};
+    bool rdi_chunked_seen_{false};     // RDI thread only
     std::atomic<uint8_t> e2e_format_{static_cast<uint8_t>(E2eCrcFormat::kUnknown)};
 
     // --- Thread Functions ---
@@ -141,6 +146,9 @@ private:
     void process_rdi_datagram(const uint8_t* data, size_t len);
     void process_shi_datagram(const uint8_t* data, size_t len);
     void process_spi_datagram(const uint8_t* data, size_t len);
+    void process_rdi_chunked(const uint8_t* data, size_t len, const SomeipHeader& hdr);
+    void on_rdi_scan(RdiScan& scan);
+    void count_rdi_loss(const E2eVerdict& verdict);
     void deliver_rdi_frame(RdiFrame& frame, const E2eVerdict& verdict);
     bool consume_e2e_header(const uint8_t*& payload, size_t& payload_len,
                             uint32_t expected_data_id, const char* stream_name,
