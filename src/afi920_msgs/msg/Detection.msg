@@ -1,22 +1,23 @@
 # Single radar detection from AFI920 sensor (ISO 23150 RDI)
 # Coordinate: sensor frame (X=forward, Y=left, Z=up)
-# Current RDI wire detection is 51 bytes. Extra legacy fields below are
-# retained for ROS API compatibility and default to 0 when absent on the wire.
+# Current RDI wire detection is 51 bytes. Fields marked "legacy, always 0" are
+# not on the wire; they are retained for ROS API compatibility and are 0.
 
 # Identification
 uint16 detection_id
-uint16 object_id_reference             # ObjectIDReference (reserved, 0xFFFF = no tracking)
+uint16 object_id_reference             # ObjectIDReference (always 0: no tracking)
 uint8 existence_probability            # 1-100 % (90-100 real, 70-89 suspected ghost, 50-69 likely ghost, 1-49 ghost;
                                        # 98/97/95/93 = range/angle/range+angle/velocity shape-estimation points)
-float32 timestamp_difference           # seconds offset from header timestamp
+float32 timestamp_difference           # s, from DetectionArray.timestamp_measurement_ns to the centre of this
+                                       # detection's measurement interval (not from header.stamp)
 
 # Position (spherical, as received from sensor)
-float32 radial_distance                # meters (0-300)
-float32 azimuth                        # radians (±60°)
-float32 elevation                      # radians (±15°)
-float32 radial_distance_error          # meters
-float32 azimuth_error                  # radians
-float32 elevation_error                # radians
+float32 radial_distance                # meters (design range 0-300, not saturated)
+float32 azimuth                        # radians (design range +-60 deg; up to +-61 deg can occur)
+float32 elevation                      # radians (design range +-15 deg; up to +-16 deg can occur)
+float32 radial_distance_error          # meters, fixed accuracy per Range Mode and sub-cycle (0.025-0.35)
+float32 azimuth_error                  # radians, fixed accuracy 0.001745 (0.1 deg)
+float32 elevation_error                # radians, fixed accuracy 0.001745 (0.1 deg)
 
 # Position (Cartesian, computed from spherical)
 float32 x                              # meters
@@ -25,26 +26,26 @@ float32 z                              # meters
 
 # Dynamics
 float32 radial_velocity                # m/s (negative=approaching)
-float32 radial_velocity_error          # m/s
+float32 radial_velocity_error          # m/s, fixed accuracy 0.065
 
 # Signal quality
-float32 rcs                            # dBm² (radar cross section)
-float32 rcs_error                      # dBm²
-float32 snr                            # dB (signal-to-noise ratio)
-float32 snr_error                      # dB
+float32 rcs                            # dBsm (radar cross section, -20 to 40)
+float32 rcs_error                      # dBsm (legacy, always 0)
+float32 snr                            # dB (signal-to-noise ratio, 0 to 254)
+float32 snr_error                      # dB (legacy, always 0)
 
 # Probabilities
-uint8 multi_target_probability         # 0-100 %
+uint8 multi_target_probability         # legacy, always 0
 uint16 ambiguity_grouping_id           # ambiguity group ID (always 0: not supported)
-uint8 detection_ambiguity_probability  # reserved
-uint8 free_space_probability           # reserved
+uint8 detection_ambiguity_probability  # legacy, always 0
+uint8 free_space_probability           # legacy, always 0
 
-# Classification (up to 8 slots)
+# Classification (legacy, always 0)
 uint8 num_classifications
-uint8[8] classification_type           # 0=none, 1=noise, 2=obstacle, 3=under, 4=over, 5=nearest, 6=strongest
-uint8[8] classification_confidence     # 0-100 per slot
+uint8[8] classification_type           # legacy enum: 0=none, 1=noise, 2=obstacle, 3=under, 4=over, 5=nearest, 6=strongest
+uint8[8] classification_confidence     # legacy, 0-100 per slot
 
-# Debug fields (15 bytes in wire format, user-defined extension to ISO 23150)
+# Debug fields (legacy, always 0: the current wire detection carries no debug block)
 float32 debug_power                    # dB, Linear Level NCI Power
 uint8 debug_azimuth_method             # 1-4, azimuth estimation method flag
 uint8 debug_elevation_method           # 1-2, elevation estimation method flag

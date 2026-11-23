@@ -9,5 +9,5 @@ float32 elevation_end                  # radians
 uint8 BLOCKAGE_NONE=0
 uint8 BLOCKAGE_PARTIAL=1
 uint8 BLOCKAGE_FULL=2
-uint8 BLOCKAGE_UNKNOWN=3
+uint8 BLOCKAGE_UNKNOWN=3                # not sent on interface v1.2.0
 uint8 blockage_status

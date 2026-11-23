@@ -328,6 +328,144 @@ TEST(RdiScanAssemblerTest, ChunkWithWrongSizeIsRejected)
     EXPECT_FALSE(sink.scans[0].IsComplete());
 }
 
+TEST(RdiScanAssemblerTest, ChunkWithFirstEntityIndexOffGridIsRejected)
+{
+    Scan s = split(make_payload(30, 6));
+    pack_le16(&s.chunks[1][4], 28);  // not a multiple of EntitiesPerChunk 27
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 76, s, 0);
+    feed_chunk(a, sink, 76, s, 0, 0);
+    feed_chunk(a, sink, 76, s, 1, 0);
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_EQ(sink.scans[0].chunks_received, 1u);
+    EXPECT_EQ(sink.scans[0].chunks_rejected, 1u);
+    EXPECT_TRUE(detections_in_order(sink.scans[0], 0, 27));
+}
+
+TEST(RdiScanAssemblerTest, ChunksArePlacedByFirstEntityIndex)
+{
+    const Scan s = split(make_payload(60, 7));
+    ASSERT_EQ(s.chunks.size(), 3u);
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 77, s, 0);
+    // Event index and FirstEntityIndex disagree: the body decides the place.
+    a.OnChunk(77, ok_e2e(), 0, s.chunks[1].data(), s.chunks[1].size(), 0, sink.emit());
+    a.OnChunk(77, ok_e2e(), 1, s.chunks[0].data(), s.chunks[0].size(), 0, sink.emit());
+    a.OnChunk(77, ok_e2e(), 2, s.chunks[2].data(), s.chunks[2].size(), 0, sink.emit());
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_EQ(sink.scans[0].chunks_received, 3u);
+    EXPECT_EQ(sink.scans[0].chunks_rejected, 0u);
+    EXPECT_TRUE(detections_in_order(sink.scans[0], 0, 60));
+}
+
+TEST(RdiScanAssemblerTest, SecondChunkForTheSameFirstEntityIndexIsRejected)
+{
+    const Scan s = split(make_payload(60, 8));
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 78, s, 0);
+    feed_chunk(a, sink, 78, s, 0, 0);
+    a.OnChunk(78, ok_e2e(), 1, s.chunks[0].data(), s.chunks[0].size(), 0, sink.emit());
+    feed_chunk(a, sink, 78, s, 2, 0);
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_EQ(sink.scans[0].chunks_received, 2u);
+    EXPECT_EQ(sink.scans[0].chunks_rejected, 1u);
+    EXPECT_EQ(sink.scans[0].frame.message.num_detections, 33u);
+}
+
+TEST(RdiScanAssemblerTest, ChunkWhoseSlotIsNotBelowChunkCountIsRejected)
+{
+    Scan s = split(make_payload(30, 9));
+    ASSERT_EQ(s.chunks.size(), 2u);
+    pack_le16(&s.chunks[1][4], 81);  // slot 3, ChunkCount is 2
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 79, s, 0);
+    feed_chunk(a, sink, 79, s, 0, 0);
+    feed_chunk(a, sink, 79, s, 1, 0);
+    feed_header(a, sink, 79, s, 0);  // header B closes the scan
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_EQ(sink.scans[0].chunks_received, 1u);
+    EXPECT_EQ(sink.scans[0].chunks_rejected, 1u);
+    EXPECT_TRUE(detections_in_order(sink.scans[0], 0, 27));
+}
+
+TEST(RdiScanAssemblerTest, ChunkThatPassedE2eReplacesAFailedCopyOfItsSlot)
+{
+    const Scan s = split(make_payload(60, 10));
+    Scan corrupt = s;
+    pack_le16(&corrupt.chunks[1][4], 27);  // failed copy also claims slot 1
+    corrupt.chunks[1][BTS_RDI_CHUNK_HEADER_SIZE + 1] = 0xEE;  // DetectionID damaged
+    RdiMessageE2e mismatch = ok_e2e();
+    mismatch.status = E2eStatus::kCrcMismatch;
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 81, s, 0);
+    // Event 0x8100 carries the failed copy of slot 1; Event 0x8101 the good one.
+    a.OnChunk(81, mismatch, 0, corrupt.chunks[1].data(), corrupt.chunks[1].size(), 0,
+              sink.emit());
+    feed_chunk(a, sink, 81, s, 1, 0);
+    feed_chunk(a, sink, 81, s, 2, 0);
+    feed_header(a, sink, 81, s, 0);
+    ASSERT_EQ(sink.scans.size(), 1u);
+    const RdiScan& r = sink.scans[0];
+    EXPECT_EQ(r.chunks_received, 2u);
+    EXPECT_EQ(r.chunks_rejected, 1u);
+    ASSERT_EQ(r.frame.message.num_detections, 33u);
+    EXPECT_EQ(r.frame.message.detections[0].detection_id, 27u);
+    EXPECT_EQ(r.frame.message.detections[32].detection_id, 59u);
+}
+
+TEST(RdiScanAssemblerTest, FailedChunkDoesNotReplaceAPassedCopyOfItsSlot)
+{
+    const Scan s = split(make_payload(60, 11));
+    RdiMessageE2e mismatch = ok_e2e();
+    mismatch.status = E2eStatus::kCrcMismatch;
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 82, s, 0);
+    feed_chunk(a, sink, 82, s, 0, 0);
+    a.OnChunk(82, mismatch, 1, s.chunks[0].data(), s.chunks[0].size(), 0, sink.emit());
+    feed_chunk(a, sink, 82, s, 2, 0);
+    feed_header(a, sink, 82, s, 0);
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_EQ(sink.scans[0].chunks_received, 2u);
+    EXPECT_EQ(sink.scans[0].chunks_rejected, 1u);
+    EXPECT_EQ(sink.scans[0].frame.message.detections[0].detection_id, 0u);
+}
+
+TEST(RdiScanAssemblerTest, HeaderBodyLongerThan40BytesIsAccepted)
+{
+    Scan s = split(make_payload(30, 12));
+    s.header.resize(BTS_RDI_HEADER_MSG_SIZE + 4, 0xAB);  // trailing bytes are ignored
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 83, s, 0);
+    feed_chunk(a, sink, 83, s, 0, 0);
+    feed_chunk(a, sink, 83, s, 1, 0);
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_TRUE(sink.scans[0].has_header);
+    EXPECT_TRUE(sink.scans[0].IsComplete());
+    EXPECT_TRUE(detections_in_order(sink.scans[0], 0, 30));
+}
+
+TEST(RdiScanAssemblerTest, HeaderBodyShorterThan40BytesIsInvalid)
+{
+    Scan s = split(make_payload(30, 13));
+    s.header.resize(BTS_RDI_HEADER_MSG_SIZE - 1);
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 84, s, 0);
+    feed_chunk(a, sink, 84, s, 0, 0);
+    feed_chunk(a, sink, 84, s, 1, 0);
+    a.Poll(100 * kMs, sink.emit());
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_FALSE(sink.scans[0].has_header);
+    EXPECT_EQ(sink.scans[0].frame.message.num_detections, 0u);
+}
+
 TEST(RdiScanAssemblerTest, WorstE2eResultMarksTheScan)
 {
     const Scan s = split(make_payload(60, 4));

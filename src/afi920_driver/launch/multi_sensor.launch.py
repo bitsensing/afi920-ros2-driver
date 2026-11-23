@@ -67,7 +67,7 @@ def generate_launch_description():
                               description='Broadcast each sensor mounting pose (from SPI) as TF'),
         DeclareLaunchArgument(
             'config_file', default_value='',
-            description='Path to YAML config file (overrides individual params)'),
+            description='Path to YAML config file (other arguments are then ignored)'),
     ]
 
     # Declare per-sensor launch arguments

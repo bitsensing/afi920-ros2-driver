@@ -101,7 +101,7 @@ TEST(RdiParserTest, R1_06_AllZerosPayload) {
 
 TEST(RdiParserTest, R1_07_AllOnesPayload) {
     std::vector<uint8_t> buf(kHdr + kDet, 0xFF);
-    // num_detections = 0xFFFF → should be clamped to 4096
+    // num_detections = 0xFFFF -> should be clamped to 8192
     // but buffer only has 1 detection worth → further clamped to 1
     RdiParser parser;
     RdiFrame frame{};
@@ -125,6 +125,22 @@ TEST(RdiParserTest, R1_08_MaxDetections4096) {
     EXPECT_EQ(frame.detections_storage.size(), 4096u);
 }
 
+TEST(RdiParserTest, R1_08b_SingleMessageLimit8192) {
+    // Single-message format (v1.0.x / v1.1.0): protocol limit 8192 detections.
+    std::vector<uint8_t> buf(kHdr + kDet * 8193, 0);
+    buf[3] = 0x08;
+    buf[4] = 1;
+    // num_detections = 8193 = 0x2001 LE -> clamped to 8192
+    buf[34] = 0x01;
+    buf[35] = 0x20;
+
+    RdiParser parser;
+    RdiFrame frame{};
+    EXPECT_EQ(parser.Parse(buf.data(), buf.size(), frame), 0);
+    EXPECT_EQ(frame.message.num_detections, 8192);
+    EXPECT_EQ(frame.detections_storage.size(), 8192u);
+}
+
 TEST(RdiParserTest, R1_09_SingleBytePayload) {
     uint8_t one = 0x42;
     RdiParser parser;
@@ -141,7 +157,7 @@ TEST(RdiParserTest, R1_10_DetectionCountOverflow) {
     RdiParser parser;
     RdiFrame frame{};
     EXPECT_EQ(parser.Parse(buf.data(), buf.size(), frame), 0);
-    // Should clamp: first to 4096, then to buffer capacity = 0
+    // Should clamp: first to 8192, then to buffer capacity = 0
     EXPECT_EQ(frame.message.num_detections, 0);
     EXPECT_TRUE(frame.detections_storage.empty());
 }

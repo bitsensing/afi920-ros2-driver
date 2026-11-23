@@ -21,8 +21,8 @@ for arg in "$@"; do
 done
 
 # ── Paths ────────────────────────────────────────────────
-# This script can be run from the repo root (standalone workspace)
-# or from inside a parent workspace (e.g., ~/ros2_ws/src/afi920_ros/)
+# The script changes to its own directory and builds a standalone workspace
+# there (build/, install/, log/ next to run.sh), wherever it is called from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 

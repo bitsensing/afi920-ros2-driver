@@ -3,6 +3,8 @@
 
 #include "afi920_driver/parsers/endian_util.hpp"
 
+#include <array>
+
 namespace afi920_driver {
 
 static_assert(kRdiMaxChunks == BTS_RDI_MAX_CHUNKS, "chunk Event range and interface limit differ");
@@ -101,7 +103,7 @@ void RdiScanAssembler::Reset()
 
 bool RdiScanAssembler::IsComplete() const
 {
-    if (header_.size() != BTS_RDI_HEADER_MSG_SIZE) return false;
+    if (header_.size() < BTS_RDI_HEADER_MSG_SIZE) return false;
     const uint16_t chunk_count = detail::unpack_le16(header_.data() + BTS_RDI_HEADER_SIZE + 2);
     if (chunk_count > kRdiMaxChunks) return false;
     for (uint16_t k = 0; k < chunk_count; ++k) {
@@ -135,7 +137,14 @@ void RdiScanAssembler::Close(const Emit& emit)
         return;
     }
 
-    auto& storage = scan.frame.detections_storage;
+    // Validate each chunk, then place it by FirstEntityIndex (01_RDI section 2,
+    // step 5). The slot of a chunk is FirstEntityIndex / EntitiesPerChunk; a
+    // chunk whose FirstEntityIndex is not a multiple of EntitiesPerChunk is
+    // dropped (Interface Overview section 3.2.3, partial reception). When two
+    // chunks claim one slot, a copy that passed its E2E check replaces one that
+    // did not; otherwise the first one is kept.
+    std::array<int, kRdiMaxChunks> slot_chunk;
+    slot_chunk.fill(-1);
     for (uint16_t k = 0; k < kRdiMaxChunks; ++k) {
         Chunk& c = chunks_[k];
         if (!c.present) continue;
@@ -147,13 +156,30 @@ void RdiScanAssembler::Close(const Emit& emit)
             continue;
         }
         const uint32_t message_counter = detail::unpack_le32(b);
+        const uint16_t first_index = detail::unpack_le16(b + 4);
         const uint16_t entity_count = detail::unpack_le16(b + 6);
+        const uint16_t slot = static_cast<uint16_t>(first_index / layout.entities_per_chunk);
         if (entity_count > layout.entities_per_chunk ||
             len != kChunkHeaderSize + static_cast<size_t>(entity_count) * kDetectionSize ||
-            message_counter != scan.frame.message.message_counter) {
+            message_counter != scan.frame.message.message_counter ||
+            first_index % layout.entities_per_chunk != 0 ||
+            slot >= layout.chunk_count) {
             ++scan.chunks_rejected;
             continue;
         }
+        if (slot_chunk[slot] >= 0) {
+            ++scan.chunks_rejected;
+            if (!c.e2e_ok || chunks_[slot_chunk[slot]].e2e_ok) continue;
+        }
+        slot_chunk[slot] = k;
+    }
+
+    auto& storage = scan.frame.detections_storage;
+    for (uint16_t slot = 0; slot < layout.chunk_count; ++slot) {
+        if (slot_chunk[slot] < 0) continue;
+        const std::vector<uint8_t>& body = chunks_[slot_chunk[slot]].body;
+        const uint8_t* b = body.data();
+        const uint16_t entity_count = detail::unpack_le16(b + 6);
         const size_t base = storage.size();
         storage.resize(base + entity_count);
         for (uint16_t i = 0; i < entity_count; ++i) {

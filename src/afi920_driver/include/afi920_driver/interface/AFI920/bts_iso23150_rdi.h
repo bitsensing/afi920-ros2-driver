@@ -27,9 +27,13 @@ extern "C" {
 
 #define BTS_RDI_HEADER_SIZE             (36u)
 #define BTS_RDI_DETECTION_SIZE          (51u)
-#define BTS_RDI_MAX_DETECTIONS          (4096u)
+/* Detections the radar sends per scan (interface v1.2.0). */
+#define BTS_RDI_MAX_DETECTIONS          (2048u)
+/* Protocol limit of the single-message format (SOME/IP Interface Version
+ * 0x01, interface v1.0.x and v1.1.0). */
+#define BTS_RDI_LEGACY_MAX_DETECTIONS   (8192u)
 #define BTS_RDI_MAX_CLASSIFICATIONS     (8u)
-#define BTS_RDI_MAX_PAYLOAD_SIZE        (BTS_RDI_HEADER_SIZE + BTS_RDI_DETECTION_SIZE * BTS_RDI_MAX_DETECTIONS)
+#define BTS_RDI_MAX_PAYLOAD_SIZE        (BTS_RDI_HEADER_SIZE + BTS_RDI_DETECTION_SIZE * BTS_RDI_LEGACY_MAX_DETECTIONS)
 
 /*============================================================================
  * Header / chunk messages (interface v1.2.0, SOME/IP Interface Version 0x02)
