@@ -108,10 +108,22 @@ static RdiMessageE2e ok_e2e()
     return e2e;
 }
 
-static void feed_header(RdiScanAssembler& a, Sink& sink, uint32_t counter,
-                        const Scan& s, uint64_t t, const RdiMessageE2e& e2e = ok_e2e())
+// The sensor increments the SOME/IP Session ID on every message, so header A
+// and header B of one scan never carry the same one. The helper mirrors that by
+// handing out a fresh id per call; a test that replays a datagram passes the
+// session of the message it repeats.
+static uint16_t next_session()
 {
-    a.OnHeader(counter, e2e, s.header.data(), s.header.size(), t, sink.emit());
+    static uint16_t s = 0;
+    return ++s;
+}
+
+static void feed_header(RdiScanAssembler& a, Sink& sink, uint32_t counter,
+                        const Scan& s, uint64_t t, const RdiMessageE2e& e2e = ok_e2e(),
+                        int session = -1)
+{
+    const uint16_t sid = (session < 0) ? next_session() : static_cast<uint16_t>(session);
+    a.OnHeader(counter, e2e, s.header.data(), s.header.size(), sid, t, sink.emit());
 }
 
 static void feed_chunk(RdiScanAssembler& a, Sink& sink, uint32_t counter,
@@ -523,4 +535,43 @@ TEST(RdiScanAssemblerTest, ResetForgetsOpenAndClosedScans)
     feed_chunk(a, sink, 95, s, 0, 0);
     feed_chunk(a, sink, 95, s, 1, 0);
     EXPECT_EQ(sink.scans.size(), 1u);
+}
+
+// UDP can deliver a datagram twice. A repeat of header A must not stand in for
+// header B, which would close the scan before a single chunk had arrived and
+// publish an empty scan while every E2E field still reported success.
+TEST(RdiScanAssemblerTest, RepeatedHeaderADoesNotCloseTheScan)
+{
+    const Scan s = split(make_payload(60, 4));
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 21, s, 0, ok_e2e(), 0x1000);
+    feed_header(a, sink, 21, s, 0, ok_e2e(), 0x1000);  // the same datagram again
+    EXPECT_TRUE(sink.scans.empty());
+
+    feed_chunk(a, sink, 21, s, 0, 0);
+    feed_chunk(a, sink, 21, s, 1, 0);
+    feed_chunk(a, sink, 21, s, 2, 0);
+    ASSERT_EQ(sink.scans.size(), 1u);
+    const RdiScan& r = sink.scans[0];
+    EXPECT_TRUE(r.IsComplete());
+    EXPECT_EQ(r.frame.message.num_detections, 60u);
+    EXPECT_TRUE(detections_in_order(r, 0, 60));
+}
+
+// A repeated header still closes a scan once its own header B arrives.
+TEST(RdiScanAssemblerTest, RepeatedHeaderAStillAllowsHeaderBToClose)
+{
+    const Scan s = split(make_payload(60, 4));
+    RdiScanAssembler a;
+    Sink sink;
+    feed_header(a, sink, 22, s, 0, ok_e2e(), 0x2000);
+    feed_header(a, sink, 22, s, 0, ok_e2e(), 0x2000);
+    feed_chunk(a, sink, 22, s, 0, 0);
+    EXPECT_TRUE(sink.scans.empty());
+    feed_header(a, sink, 22, s, 1 * kMs, ok_e2e(), 0x2001);  // header B
+    ASSERT_EQ(sink.scans.size(), 1u);
+    EXPECT_FALSE(sink.scans[0].IsComplete());
+    EXPECT_EQ(sink.scans[0].chunks_received, 1u);
+    EXPECT_EQ(sink.scans[0].frame.message.num_detections, 27u);
 }

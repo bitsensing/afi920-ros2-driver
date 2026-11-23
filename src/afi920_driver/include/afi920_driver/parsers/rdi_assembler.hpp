@@ -67,9 +67,11 @@ public:
         : timeout_ns_(timeout_ns) {}
 
     /// Header message body (after the E2E header) of Event 0x8002.
+    /// session_id is the SOME/IP Session ID, which tells header B of a scan
+    /// apart from a repeat of header A.
     void OnHeader(uint32_t e2e_counter, const RdiMessageE2e& e2e,
-                  const uint8_t* body, size_t len, uint64_t now_ns,
-                  const Emit& emit);
+                  const uint8_t* body, size_t len, uint16_t session_id,
+                  uint64_t now_ns, const Emit& emit);
 
     /// Chunk message body (after the E2E header) of Event 0x8100 + chunk_index.
     void OnChunk(uint32_t e2e_counter, const RdiMessageE2e& e2e, uint16_t chunk_index,
@@ -103,6 +105,7 @@ private:
     uint32_t counter_ = 0;
     uint64_t first_ns_ = 0;
     int      headers_seen_ = 0;
+    uint16_t header_sessions_[2] = {0, 0};  // Session IDs of the headers counted
     bool     header_e2e_ok_ = false;
     std::vector<uint8_t> header_;        // body of the header used (empty: none)
     std::array<Chunk, kRdiMaxChunks> chunks_{};

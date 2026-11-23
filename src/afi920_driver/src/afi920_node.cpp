@@ -536,7 +536,8 @@ void Afi920Node::process_rdi_chunked(const uint8_t* data, size_t len, const Some
     const uint32_t counter = verdict.header.counter;
     const uint64_t now_ns = steady_now_ns();
     if (hdr.method_id == kEventRdi) {
-        rdi_assembler_.OnHeader(counter, e2e, payload, payload_len, now_ns, rdi_scan_emit_);
+        rdi_assembler_.OnHeader(counter, e2e, payload, payload_len, hdr.session_id,
+                                now_ns, rdi_scan_emit_);
     } else {
         rdi_assembler_.OnChunk(counter, e2e,
                                static_cast<uint16_t>(hdr.method_id - kEventRdiChunkBase),
