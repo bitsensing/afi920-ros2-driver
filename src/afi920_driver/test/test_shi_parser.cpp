@@ -68,7 +68,7 @@ TEST(ShiParserTest, R2_08_OperationModesMaxLocalStorage)
     ShiMessage msg{};
     EXPECT_EQ(parser.Parse(buf.data(), buf.size(), msg), 0);
     EXPECT_EQ(msg.num_valid_operation_modes, BTS_SHI_MAX_OPERATION_MODES);
-    for (int i = 0; i < BTS_SHI_MAX_OPERATION_MODES; i++) {
+    for (unsigned i = 0; i < BTS_SHI_MAX_OPERATION_MODES; i++) {
         EXPECT_EQ(msg.sensor_operation_modes[i], i);
     }
 }

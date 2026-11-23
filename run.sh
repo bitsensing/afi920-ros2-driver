@@ -28,7 +28,8 @@ cd "$SCRIPT_DIR"
 
 # ── ROS2 Environment ────────────────────────────────────
 if [ -z "$ROS_DISTRO" ]; then
-    for distro in humble foxy jazzy; do
+    # Newest first, so a host with several distributions uses the latest one.
+    for distro in lyrical kilted jazzy humble foxy; do
         if [ -f "/opt/ros/$distro/setup.bash" ]; then
             source "/opt/ros/$distro/setup.bash"
             break

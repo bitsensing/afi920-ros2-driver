@@ -30,7 +30,19 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+// Lyrical ships only the .hpp header; Foxy ships only the .h header.
+// cppcheck 1.90 (Foxy) cannot evaluate __has_include, hence the suppression.
+#ifdef __has_include
+// cppcheck-suppress preprocessorErrorDirective
+#  if __has_include(<tf2_ros/transform_broadcaster.hpp>)
+#    define AFI920_HAS_TF2_ROS_BROADCASTER_HPP 1
+#  endif
+#endif
+#ifdef AFI920_HAS_TF2_ROS_BROADCASTER_HPP
+#include <tf2_ros/transform_broadcaster.hpp>
+#else
 #include <tf2_ros/transform_broadcaster.h>
+#endif
 
 #include <afi920_msgs/msg/detection_array.hpp>
 #include <afi920_msgs/msg/e2e_status.hpp>

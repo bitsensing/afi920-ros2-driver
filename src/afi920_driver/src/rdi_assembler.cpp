@@ -4,6 +4,7 @@
 #include "afi920_driver/parsers/endian_util.hpp"
 
 #include <array>
+#include <vector>
 
 namespace afi920_driver {
 
@@ -57,13 +58,29 @@ bool RdiScanAssembler::Admit(uint32_t e2e_counter, const RdiMessageE2e& e2e,
 }
 
 void RdiScanAssembler::OnHeader(uint32_t e2e_counter, const RdiMessageE2e& e2e,
-                                const uint8_t* body, size_t len,
+                                const uint8_t* body, size_t len, uint16_t session_id,
                                 uint64_t now_ns, const Emit& emit)
 {
     if (!Admit(e2e_counter, e2e, now_ns, emit)) return;
-    ++headers_seen_;
-    // Header A and header B carry the same body; one is used, preferring a
-    // copy that passed its E2E check.
+
+    // Header A and header B carry the same body and differ only in their SOME/IP
+    // Session ID. UDP can deliver a datagram twice, and counting a repeat of
+    // header A as header B would close the scan before any chunk had arrived, so
+    // a header whose Session ID was already counted is a duplicate. It may still
+    // supply the header body when the copy held so far failed its E2E check.
+    bool duplicate = false;
+    for (int i = 0; i < headers_seen_ && i < 2; ++i) {
+        if (header_sessions_[i] == session_id) {
+            duplicate = true;
+            break;
+        }
+    }
+    if (!duplicate) {
+        if (headers_seen_ < 2) header_sessions_[headers_seen_] = session_id;
+        ++headers_seen_;
+    }
+
+    // One header body is used, preferring a copy that passed its E2E check.
     const bool ok = Passed(e2e);
     if (body && (header_.empty() || (!header_e2e_ok_ && ok))) {
         header_.assign(body, body + len);

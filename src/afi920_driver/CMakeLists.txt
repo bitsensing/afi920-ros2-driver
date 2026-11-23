@@ -21,18 +21,6 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(afi920_msgs REQUIRED)
 
-set(DEPENDENCIES
-  rclcpp
-  rclcpp_components
-  sensor_msgs
-  std_msgs
-  visualization_msgs
-  geometry_msgs
-  tf2
-  tf2_ros
-  afi920_msgs
-)
-
 # --- Driver Library ---
 find_package(Threads REQUIRED)
 
@@ -53,8 +41,39 @@ target_include_directories(afi920_driver_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-target_link_libraries(afi920_driver_lib Threads::Threads)
-ament_target_dependencies(afi920_driver_lib ${DEPENDENCIES})
+target_link_libraries(afi920_driver_lib PUBLIC Threads::Threads)
+
+# Modern CMake targets instead of ament_target_dependencies() (deprecated
+# from Kilted). A package that exports no target (rclcpp_components and
+# sensor_msgs on Foxy) is linked through its classic variables.
+foreach(_dep rclcpp tf2 tf2_ros)
+  if(TARGET ${_dep}::${_dep})
+    target_link_libraries(afi920_driver_lib PUBLIC ${_dep}::${_dep})
+  else()
+    target_include_directories(afi920_driver_lib PUBLIC
+      ${${_dep}_INCLUDE_DIRS})
+    target_link_libraries(afi920_driver_lib PUBLIC ${${_dep}_LIBRARIES})
+  endif()
+endforeach()
+if(TARGET rclcpp_components::component)
+  target_link_libraries(afi920_driver_lib PUBLIC
+    rclcpp_components::component)
+else()
+  target_include_directories(afi920_driver_lib PUBLIC
+    ${rclcpp_components_INCLUDE_DIRS})
+  target_link_libraries(afi920_driver_lib PUBLIC
+    ${rclcpp_components_LIBRARIES})
+endif()
+foreach(_msg sensor_msgs std_msgs visualization_msgs geometry_msgs
+    afi920_msgs)
+  if(${_msg}_TARGETS)
+    target_link_libraries(afi920_driver_lib PUBLIC ${${_msg}_TARGETS})
+  else()
+    target_include_directories(afi920_driver_lib PUBLIC
+      ${${_msg}_INCLUDE_DIRS})
+    target_link_libraries(afi920_driver_lib PUBLIC ${${_msg}_LIBRARIES})
+  endif()
+endforeach()
 
 # --- Composable Node Registration ---
 rclcpp_components_register_node(afi920_driver_lib
@@ -105,36 +124,28 @@ if(BUILD_TESTING)
   # Unit tests
   ament_add_gtest(test_pointcloud_builder test/test_pointcloud_builder.cpp)
   target_link_libraries(test_pointcloud_builder afi920_driver_lib)
-  ament_target_dependencies(test_pointcloud_builder sensor_msgs afi920_msgs)
 
   ament_add_gtest(test_someip_parser test/test_someip_parser.cpp)
   target_link_libraries(test_someip_parser afi920_driver_lib)
-  ament_target_dependencies(test_someip_parser ${DEPENDENCIES})
 
   ament_add_gtest(test_config_client test/test_config_client.cpp)
   target_link_libraries(test_config_client afi920_driver_lib)
-  ament_target_dependencies(test_config_client ${DEPENDENCIES})
 
   ament_add_gtest(test_rdi_parser test/test_rdi_parser.cpp)
   target_link_libraries(test_rdi_parser afi920_driver_lib)
-  ament_target_dependencies(test_rdi_parser ${DEPENDENCIES})
 
   ament_add_gtest(test_rdi_assembler test/test_rdi_assembler.cpp)
   target_link_libraries(test_rdi_assembler afi920_driver_lib)
-  ament_target_dependencies(test_rdi_assembler ${DEPENDENCIES})
 
   ament_add_gtest(test_shi_parser test/test_shi_parser.cpp)
   target_link_libraries(test_shi_parser afi920_driver_lib)
-  ament_target_dependencies(test_shi_parser ${DEPENDENCIES})
 
   ament_add_gtest(test_spi_parser test/test_spi_parser.cpp)
   target_link_libraries(test_spi_parser afi920_driver_lib)
-  ament_target_dependencies(test_spi_parser ${DEPENDENCIES})
 
   # Loopback only: parameter changes and TCP reconnect without a sensor.
   ament_add_gtest(test_node_runtime test/test_node_runtime.cpp TIMEOUT 60)
   target_link_libraries(test_node_runtime afi920_driver_lib)
-  ament_target_dependencies(test_node_runtime ${DEPENDENCIES})
 endif()
 
 ament_package()

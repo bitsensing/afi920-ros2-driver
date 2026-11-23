@@ -22,7 +22,19 @@
 #include <vector>
 
 #include <rclcpp_components/register_node_macro.hpp>
+// Lyrical ships only the .hpp header; Foxy ships only the .h header.
+// cppcheck 1.90 (Foxy) cannot evaluate __has_include, hence the suppression.
+#ifdef __has_include
+// cppcheck-suppress preprocessorErrorDirective
+#  if __has_include(<tf2/LinearMath/Quaternion.hpp>)
+#    define AFI920_HAS_TF2_QUATERNION_HPP 1
+#  endif
+#endif
+#ifdef AFI920_HAS_TF2_QUATERNION_HPP
+#include <tf2/LinearMath/Quaternion.hpp>
+#else
 #include <tf2/LinearMath/Quaternion.h>
+#endif
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
 namespace afi920_driver {
@@ -524,7 +536,8 @@ void Afi920Node::process_rdi_chunked(const uint8_t* data, size_t len, const Some
     const uint32_t counter = verdict.header.counter;
     const uint64_t now_ns = steady_now_ns();
     if (hdr.method_id == kEventRdi) {
-        rdi_assembler_.OnHeader(counter, e2e, payload, payload_len, now_ns, rdi_scan_emit_);
+        rdi_assembler_.OnHeader(counter, e2e, payload, payload_len, hdr.session_id,
+                                now_ns, rdi_scan_emit_);
     } else {
         rdi_assembler_.OnChunk(counter, e2e,
                                static_cast<uint16_t>(hdr.method_id - kEventRdiChunkBase),
