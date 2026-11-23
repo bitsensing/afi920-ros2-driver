@@ -1,7 +1,7 @@
 # AFI920 ROS 2 드라이버 — AI 통합 가이드
 
 > **대상:** AI 에이전트, LLM 기반 자동화, bitsensing AFI920 4D 이미징 레이더를 ROS 2 시스템에 가장 빠르게 통합하려는 개발자  
-> **드라이버 버전:** 2.2.0 · **지원 ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04) · **아키텍처:** x86_64, aarch64  
+> **드라이버 버전:** 2.2.0 · **지원 ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04), Jazzy (Ubuntu 24.04, aarch64) · **아키텍처:** x86_64, aarch64  
 > **라이선스:** BSD-3-Clause
 
 ---
@@ -92,7 +92,7 @@ afi920-ros2-driver/
 ### 표준 colcon 빌드
 
 ```bash
-source /opt/ros/$ROS_DISTRO/setup.bash   # foxy 또는 humble
+source /opt/ros/$ROS_DISTRO/setup.bash   # foxy, humble 또는 jazzy
 
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
@@ -747,7 +747,9 @@ TCP / UDP
 | `Sensor stream config differs from driver parameters` 경고 | 인터페이스 v1.1.0 이후 센서의 스트림 프로토콜, 포트, 또는 (UDP) 목적지 IP가 `host_ip`와 다름 → `transport_mode`와 포트 파라미터를 센서에 맞추거나, 센서를 재설정한 뒤 재시작하세요 |
 | Fixed Frame `base_link`에서 RViz 점군 미표시 | 센서 frame으로 가는 TF 없음 → `publish_tf`와 `publish_performance`를 `true`로 유지하거나 변환을 직접 송출하세요 |
 | 센서 frame이 두 자세 사이를 오감 | 드라이버와 URDF 또는 다른 노드가 같은 변환을 송출함 → `publish_tf:=false`를 지정하세요 |
-| RDI 없음, SHI/SPI 정상 | `SHI`의 `operation_modes[0]`이 100(Fault Mode)이거나, 하드웨어 또는 보정 결함 조건에서 20/200이면 센서는 조건이 유지되는 동안 RDI를 송신하지 않습니다 → `defect_reason`을 확인하세요. 보정 CRC 실패는 부팅 동안 유지되며, 보정 레코드를 다시 기록(0x00A6)하고 센서를 재시작해야 해소됩니다 |
+| RDI 없음, SHI/SPI 정상 | 하드웨어 결함 또는 보정 오류 조건(`defect_reason` 2 또는 5)이 성립하면 센서는 조건이 유지되는 동안 RDI를 송신하지 않습니다. 이때 `operation_modes[0]`은 100(Fault Mode)이며, 우선순위에 따라 20(Diagnostic) 또는 200(Initialising)일 수 있습니다. 20 자체는 Config API 접근 모드가 진단 모드임을 뜻하며 RDI를 멈추지 않습니다 → `defect_reason`을 확인하세요. 보정 CRC 실패는 부팅 동안 유지되며, 보정 레코드를 다시 기록(0x00A6)하고 센서를 재시작해야 해소됩니다 |
+| 기본 포트에서 `connect to ... failed -- retrying` 반복 | 스트림 포트는 센서마다 설정되며 기본값 30509–30511과 다를 수 있습니다 → SDK `GetNetworkConfig` 또는 Discovery로 `detection_port`, `health_port`, `performance_port`를 확인하고 `data_port`, `shi_port`, `spi_port`를 지정하세요 |
+| `connected` 직후 `connection ... lost -- reconnecting` 반복 | 다른 클라이언트가 스트림 포트에 접속해 있습니다. 센서는 스트림 채널당 TCP 클라이언트 1개만 받고 추가 접속을 끊습니다 → 다른 클라이언트(다른 드라이버 인스턴스, 도구, 호스트)를 종료하세요 |
 | `RDI scan ... partial` 경고 | 인터페이스 v1.2.0 묶음 메시지 누락 → 스캔은 수신한 검출만으로 발행됩니다. UDP에서는 네트워크 손실이 원인일 수 있습니다(`transport_mode:=tcp` 시도). 두 전송 방식 모두에서 센서는 송신 마감 안에 보내지 못한 묶음을 생략합니다 |
 | 멀티 센서: 토픽 누락 | 각 `<pos>_ip` 접근 가능 여부와 네임스페이스가 서로 다른지 확인하세요. 센서가 없는 노드는 재시도를 계속하므로, 보유한 센서만 `afi920.launch.py`로 실행하세요 |
 | `colcon build` 실패 | `afi920_msgs` 먼저 빌드; `$ROS_DISTRO` 소싱 확인 |

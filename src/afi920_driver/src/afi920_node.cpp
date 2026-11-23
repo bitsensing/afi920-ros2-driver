@@ -22,7 +22,19 @@
 #include <vector>
 
 #include <rclcpp_components/register_node_macro.hpp>
+// Lyrical ships only the .hpp header; Foxy ships only the .h header.
+// cppcheck 1.90 (Foxy) cannot evaluate __has_include, hence the suppression.
+#ifdef __has_include
+// cppcheck-suppress preprocessorErrorDirective
+#  if __has_include(<tf2/LinearMath/Quaternion.hpp>)
+#    define AFI920_HAS_TF2_QUATERNION_HPP 1
+#  endif
+#endif
+#ifdef AFI920_HAS_TF2_QUATERNION_HPP
+#include <tf2/LinearMath/Quaternion.hpp>
+#else
 #include <tf2/LinearMath/Quaternion.h>
+#endif
 #include <geometry_msgs/msg/transform_stamped.hpp>
 
 namespace afi920_driver {

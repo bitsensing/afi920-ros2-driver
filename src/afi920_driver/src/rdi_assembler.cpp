@@ -4,6 +4,7 @@
 #include "afi920_driver/parsers/endian_util.hpp"
 
 #include <array>
+#include <vector>
 
 namespace afi920_driver {
 

@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -128,8 +129,19 @@ TEST(TcpStreamClientRuntime, CloseInterruptsTheBackoffWait)
 
 class NodeParameterTest : public ::testing::Test {
 protected:
-    static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
-    static void TearDownTestSuite() { rclcpp::shutdown(); }
+    // Per-test hooks: SetUpTestSuite() needs gtest 1.10, and Foxy builds against gtest 1.8.
+    void SetUp() override
+    {
+        if (!rclcpp::ok()) {
+            rclcpp::init(0, nullptr);
+        }
+    }
+    void TearDown() override
+    {
+        if (rclcpp::ok()) {
+            rclcpp::shutdown();
+        }
+    }
 };
 
 TEST_F(NodeParameterTest, OnlyDynamicParametersChangeAtRuntime)

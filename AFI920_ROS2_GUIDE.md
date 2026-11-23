@@ -1,7 +1,7 @@
 # AFI920 ROS 2 Driver — AI Integration Guide
 
 > **Who this is for:** AI agents, LLM-driven automation, and developers who need the fastest path to integrating the bitsensing AFI920 4D imaging radar into a ROS 2 system.  
-> **Driver version:** 2.2.0 · **Supported ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04) · **Arch:** x86_64, aarch64  
+> **Driver version:** 2.2.0 · **Supported ROS 2:** Foxy (Ubuntu 20.04), Humble (Ubuntu 22.04), Jazzy (Ubuntu 24.04, aarch64) · **Arch:** x86_64, aarch64  
 > **License:** BSD-3-Clause
 
 ---
@@ -92,7 +92,7 @@ afi920-ros2-driver/
 ### Standard colcon build
 
 ```bash
-source /opt/ros/$ROS_DISTRO/setup.bash   # foxy or humble
+source /opt/ros/$ROS_DISTRO/setup.bash   # foxy, humble or jazzy
 
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
@@ -747,7 +747,9 @@ must use its own host ports; see [§8 Ports](#ports).
 | `Sensor stream config differs from driver parameters` warning | Interface v1.1.0+ sensor uses another stream protocol, port, or (UDP) destination IP than `host_ip` → match `transport_mode` and port parameters to the sensor, or reconfigure and restart the sensor |
 | No cloud in RViz with Fixed Frame `base_link` | No TF to the sensor frame → keep `publish_tf` and `publish_performance` at `true`, or publish the transform yourself |
 | Sensor frame jumps between two poses | Driver and URDF/another node publish the same transform → set `publish_tf:=false` |
-| RDI missing, SHI/SPI fine | `SHI` `operation_modes[0]` = 100 (Fault Mode), or 20/200 while a hardware or calibration fault holds → the sensor holds RDI back while the fault holds; check `defect_reason`. A calibration CRC failure lasts the whole boot and clears only after the calibration record is written again (0x00A6) and the sensor restarts |
+| RDI missing, SHI/SPI fine | A hardware defect or calibration error condition (`defect_reason` 2 or 5) holds → the sensor holds RDI back while it holds; `operation_modes[0]` then shows 100 (Fault Mode), or 20 (Diagnostic) / 200 (Initialising) when those take priority. Mode 20 by itself only means that the Config API access mode is Diagnostic and does not stop RDI. Check `defect_reason`. A calibration CRC failure lasts the whole boot and clears only after the calibration record is written again (0x00A6) and the sensor restarts |
+| `connect to ... failed -- retrying` with the default ports | Stream ports are set per sensor and can differ from the defaults 30509–30511 → read `detection_port`, `health_port`, `performance_port` with SDK `GetNetworkConfig` or Discovery and set `data_port`, `shi_port`, `spi_port` |
+| `connected` followed at once by `connection ... lost -- reconnecting`, repeating | Another client holds the stream port. The sensor accepts one TCP client per stream channel and resets further connections → stop the other client (another driver instance, tool or host) |
 | `RDI scan ... partial` warning | Interface v1.2.0 chunk messages missing → the scan is published with the detections that arrived. Over UDP the cause can be network loss (try `transport_mode:=tcp`); on both transports the sensor leaves out chunks it cannot send within its send window |
 | Multi-sensor: topics missing | Verify each `<pos>_ip` is reachable and namespaces differ. Nodes without a sensor keep retrying; launch only the sensors you have with `afi920.launch.py` |
 | `colcon build` fails | Build `afi920_msgs` first; check `$ROS_DISTRO` is sourced |

@@ -1,6 +1,6 @@
 # AFI920 ROS 2 Driver
 
-![ROS2](https://img.shields.io/badge/ROS2-Foxy%20%7C%20Humble-blue)
+![ROS2](https://img.shields.io/badge/ROS2-Foxy%20%7C%20Humble%20%7C%20Jazzy-blue)
 ![Platform](https://img.shields.io/badge/platform-Ubuntu%2020.04%20%7C%2022.04-blue)
 ![License](https://img.shields.io/badge/license-BSD--3--Clause-green)
 
@@ -52,6 +52,7 @@ AFI920 센서 데이터를 ROS 2 토픽으로 발행하여 고객 환경의 ROS 
 |----|-------------------|-------------|
 | Ubuntu 20.04 | Foxy Fitzroy | x86_64, aarch64 |
 | Ubuntu 22.04 | Humble Hawksbill | x86_64, aarch64 |
+| Ubuntu 24.04 | Jazzy Jalisco | aarch64 |
 
 ---
 
@@ -190,6 +191,8 @@ sudo ip addr add 192.168.10.100/24 dev eth0
 | `SPI` | `afi920_msgs/SensorPerformance` | 10 Hz | 센서 성능 및 자세 정보 |
 | `detection_count` | `visualization_msgs/Marker` | 10 Hz | 점 개수를 표시하는 RViz 텍스트 오버레이. `PointCloud2`와 함께 발행 |
 | `E2E` | `afi920_msgs/E2eStatus` | 30 Hz | RDI/SHI/SPI 메시지별 E2E 판정 결과(인터페이스 v1.2.0 RDI는 스캔당 1건). `header.stamp`는 대응 데이터 메시지의 stamp와 같습니다 |
+
+모든 토픽은 `SensorDataQoS`(best effort)로 발행합니다. 기본 reliable QoS로 구독하면 메시지를 받지 못하므로 `rclcpp::SensorDataQoS()`(C++) 또는 `qos_profile_sensor_data`(Python)로 구독하세요.
 
 `publish_tf`가 `true`(기본값)이면 드라이버는 SPI 메시지마다 수신한 센서 장착 자세를 `/tf`에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 송출합니다. `publish_performance`가 `false`이면 자세를 송출하지 않습니다.
 
@@ -393,8 +396,10 @@ rviz2 -d $(ros2 pkg prefix afi920_driver)/share/afi920_driver/config/multi_senso
 | 빌드 또는 launch 실패 | ROS 2 환경 또는 의존성 문제 | `source /opt/ros/$ROS_DISTRO/setup.bash` 후 `rosdep install`을 다시 실행하세요 |
 | 패킷 손실 또는 데이터 끊김 | 네트워크 버퍼 또는 NIC 환경 문제 | NIC 설정과 시스템 수신 버퍼를 점검하세요 |
 | `Sensor stream config differs from driver parameters` 경고 | 센서(인터페이스 v1.1.0 이후)의 스트림 프로토콜, 포트, 또는 (UDP) 목적지 IP가 `host_ip`와 다름 | `transport_mode`와 포트 파라미터를 센서 설정에 맞추거나, 센서를 재설정한 뒤 재시작하세요 |
-| `SHI`와 `SPI`는 수신되나 `PointCloud2`/`RDI`가 없음 | `SHI`의 `operation_modes[0]`이 100(Fault Mode)이거나, 하드웨어 또는 보정 결함 조건에서 20/200입니다. 센서는 조건이 유지되는 동안 RDI를 송신하지 않습니다 | `defect_reason`을 확인하세요. 보정 CRC 실패는 부팅 동안 유지되며, 보정 레코드를 다시 기록하고 센서를 재시작해야 해소됩니다 |
+| `SHI`와 `SPI`는 수신되나 `PointCloud2`/`RDI`가 없음 | 하드웨어 결함 또는 보정 오류 조건(`defect_reason` 2 또는 5)이 성립합니다. 센서는 조건이 유지되는 동안 RDI를 송신하지 않습니다. 이때 `SHI`의 `operation_modes[0]`은 100(Fault Mode)이며, 우선순위에 따라 20(Diagnostic) 또는 200(Initialising)일 수 있습니다. 20 자체는 Config API 접근 모드가 진단 모드임을 뜻하며 RDI를 멈추지 않습니다 | `defect_reason`을 확인하세요. 보정 CRC 실패는 부팅 동안 유지되며, 보정 레코드를 다시 기록하고 센서를 재시작해야 해소됩니다 |
 | `RDI scan ... partial` 경고 | 인터페이스 v1.2.0 묶음 메시지 누락. UDP 손실이거나, 센서가 송신 마감에 보내지 못한 묶음을 생략한 경우입니다(TCP와 UDP 모두) | 스캔은 수신한 검출만으로 발행됩니다. UDP에서 경고가 지속되면 `transport_mode:=tcp`를 시도하세요 |
+| 기본 포트에서 `connect to ... failed -- retrying` 반복 | 스트림 포트는 센서마다 설정되며 드라이버 기본값 30509–30511과 다를 수 있습니다 | 센서의 `detection_port`, `health_port`, `performance_port`를 SDK `GetNetworkConfig` 또는 Discovery로 확인하고 `data_port`, `shi_port`, `spi_port`를 그 값으로 지정하세요 |
+| `connected` 직후 `connection ... lost -- reconnecting` 반복 | 다른 클라이언트가 스트림 포트에 접속해 있습니다. 센서는 스트림 채널당 TCP 클라이언트 1개만 받고 추가 접속을 끊습니다 | 다른 클라이언트(다른 드라이버 인스턴스, 도구, 호스트)를 종료하세요 |
 | 멀티센서 토픽이 섞임 | namespace 또는 frame_id 중복 | 센서별로 고유한 `namespace`, `frame_id`를 사용하세요 |
 | Fixed Frame `base_link`에서 점군이 표시되지 않음 | `base_link`에서 센서 frame으로 가는 TF가 없음 | `publish_tf`와 `publish_performance`를 `true`로 유지하거나 변환을 직접 송출하세요 |
 | 센서 frame이 두 자세 사이를 오감 | 드라이버와 다른 노드가 같은 변환을 송출함 | 드라이버에 `publish_tf:=false`를 지정하세요 |

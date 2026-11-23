@@ -1,6 +1,6 @@
 # AFI920 ROS 2 Driver
 
-![ROS2](https://img.shields.io/badge/ROS2-Foxy%20%7C%20Humble-blue)
+![ROS2](https://img.shields.io/badge/ROS2-Foxy%20%7C%20Humble%20%7C%20Jazzy-blue)
 ![Platform](https://img.shields.io/badge/platform-Ubuntu%2020.04%20%7C%2022.04-blue)
 ![License](https://img.shields.io/badge/license-BSD--3--Clause-green)
 
@@ -52,6 +52,7 @@ It publishes AFI920 sensor data as ROS 2 topics for integration with customer RO
 |----|-------------------|-------------|
 | Ubuntu 20.04 | Foxy Fitzroy | x86_64, aarch64 |
 | Ubuntu 22.04 | Humble Hawksbill | x86_64, aarch64 |
+| Ubuntu 24.04 | Jazzy Jalisco | aarch64 |
 
 ---
 
@@ -195,6 +196,8 @@ Example: with the default namespace, `PointCloud2` is published as `/afi920/Poin
 | `SPI` | `afi920_msgs/SensorPerformance` | 10 Hz | Sensor performance and pose information |
 | `detection_count` | `visualization_msgs/Marker` | 10 Hz | RViz text overlay with the point count, published with `PointCloud2` |
 | `E2E` | `afi920_msgs/E2eStatus` | 30 Hz | E2E verification result of each RDI/SHI/SPI message (one per RDI scan on interface v1.2.0). `header.stamp` equals the stamp of the matching data message |
+
+All topics are published with `SensorDataQoS` (best effort). A subscriber with the default reliable QoS receives nothing; subscribe with `rclcpp::SensorDataQoS()` (C++) or `qos_profile_sensor_data` (Python).
 
 When `publish_tf` is `true` (default), the driver also broadcasts the sensor mounting pose from each SPI message on `/tf` as the transform `parent_frame_id → frame_id` (default `base_link → afi920`). The pose is not broadcast when `publish_performance` is `false`.
 
@@ -398,8 +401,10 @@ Color examples:
 | Build or launch fails | ROS 2 environment or dependency issue | Run `source /opt/ros/$ROS_DISTRO/setup.bash` and then retry `rosdep install` |
 | Packet loss or intermittent data | Network buffer or NIC issue | Check NIC settings and system receive buffer settings |
 | `Sensor stream config differs from driver parameters` warning | The sensor (interface v1.1.0+) uses a different stream protocol, port, or (UDP) destination IP than `host_ip` | Match `transport_mode` and the port parameters to the sensor, or reconfigure the sensor and restart it |
-| No `PointCloud2`/`RDI` while `SHI` and `SPI` arrive | `SHI` `operation_modes[0]` is 100 (Fault Mode), or 20/200 while a hardware or calibration fault holds: the sensor holds RDI back while the fault holds | Check `defect_reason`. A calibration CRC failure lasts the whole boot and clears only after the calibration record is written again and the sensor restarts |
+| No `PointCloud2`/`RDI` while `SHI` and `SPI` arrive | A hardware defect or calibration error condition holds (`defect_reason` 2 or 5): the sensor holds RDI back while it holds. `SHI` `operation_modes[0]` then shows 100 (Fault Mode), or 20 (Diagnostic) / 200 (Initialising) when those take priority. Mode 20 by itself only means that the Config API access mode is Diagnostic and does not stop RDI | Check `defect_reason`. A calibration CRC failure lasts the whole boot and clears only after the calibration record is written again and the sensor restarts |
 | `RDI scan ... partial` warning | Interface v1.2.0 chunk messages are missing: lost over UDP, or left out by the sensor when its send window ends (TCP and UDP) | The scan is published with the detections that arrived. Persistent warnings over UDP → try `transport_mode:=tcp` |
+| `connect to ... failed -- retrying` with the default ports | The stream ports are set per sensor and can differ from the driver defaults 30509–30511 | Read `detection_port`, `health_port` and `performance_port` from the sensor (SDK `GetNetworkConfig` or Discovery) and set `data_port`, `shi_port` and `spi_port` to them |
+| `connected` followed at once by `connection ... lost -- reconnecting`, repeating | Another client holds the stream port. The sensor accepts one TCP client per stream channel and resets further connections | Stop the other client (another driver instance, tool or host) |
 | Multi-sensor topics overlap | Duplicate namespace or frame_id | Use unique `namespace` and `frame_id` values per sensor |
 | RViz2 shows no cloud with Fixed Frame `base_link` | No TF from `base_link` to the sensor frame | Keep `publish_tf` and `publish_performance` at `true`, or publish the transform yourself |
 | Sensor frame jumps between two poses | The driver and another node publish the same transform | Set `publish_tf:=false` on the driver |
