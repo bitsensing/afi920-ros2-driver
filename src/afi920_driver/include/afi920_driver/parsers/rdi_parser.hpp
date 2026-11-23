@@ -35,11 +35,11 @@ public:
     /**
      * @brief Parse an interface v1.2.0 header message body (after the E2E header)
      * @param body Detection Header (36B) + List Layout (4B)
-     * @param len Body length; must be BTS_RDI_HEADER_MSG_SIZE
+     * @param len Body length; at least BTS_RDI_HEADER_MSG_SIZE (trailing bytes are ignored)
      * @param[out] msg Header fields; num_detections is NumberOfValidDetections
      *                 and detections is left untouched
      * @param[out] layout EntitiesPerChunk and ChunkCount
-     * @return 0 on success, -1 on a wrong length
+     * @return 0 on success, -1 on a body shorter than 40 B
      */
     static int ParseHeaderMessage(const uint8_t* body, size_t len,
                                   bts_rdi_message_t& msg, RdiListLayout& layout);

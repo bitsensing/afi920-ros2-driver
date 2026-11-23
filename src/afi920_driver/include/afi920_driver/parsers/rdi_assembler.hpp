@@ -14,6 +14,9 @@
  *     on a message of another E2E Counter, or 100 ms after its first message.
  *   - A closed scan without a usable header has no detections; one with
  *     missing chunks keeps the detections that arrived.
+ *   - A chunk is dropped when its size, MessageCounter or Event index does
+ *     not fit the header, or its FirstEntityIndex is not a multiple of
+ *     EntitiesPerChunk. Kept chunks are placed in FirstEntityIndex order.
  */
 #pragma once
 
@@ -45,7 +48,7 @@ struct RdiScan {
     uint32_t e2e_counter = 0;
     uint16_t chunk_count = 0;           ///< ChunkCount of the header
     uint16_t chunks_received = 0;       ///< chunks whose detections were used
-    uint16_t chunks_rejected = 0;       ///< chunks dropped for size, MessageCounter or index
+    uint16_t chunks_rejected = 0;       ///< chunks dropped for size, MessageCounter, index or FirstEntityIndex
     uint16_t announced_detections = 0;  ///< NumberOfValidDetections of the header
     /// Worst result over every message of the scan: CRC mismatch, then CRC
     /// zero, then OK. length_ok / data_id_ok are false when any message failed.

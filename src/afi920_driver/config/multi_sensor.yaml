@@ -1,6 +1,11 @@
 # Multi-sensor configuration example
 # Each sensor gets its own namespace and parameters
 # Result: /radar_front/PointCloud2, /radar_front/RDI, /radar_front/SHI, /radar_front/SPI, ...
+#
+# Ports: over TCP (default) all sensors keep the default ports 30509/30510/30511.
+# Over UDP each sensor must send to its own host ports: set transport_mode: "udp"
+# and a distinct data_port/shi_port/spi_port per sensor, matching the stream
+# destination ports configured on each radar.
 
 radar_front:
   afi920_driver:

@@ -8,18 +8,19 @@
  *   - afi920_msgs/DetectionArray (full detection data)
  *
  * PointCloud2 field layout (72 bytes/point, all FLOAT32):
- *   x, y, z                          — Cartesian position (m)
- *   radial_distance, azimuth_angle, elevation_angle — spherical (m, rad)
- *   radial_velocity                   — m/s
- *   radar_cross_section               — dBm²
- *   signal_noise_ratio                — dB
+ *   x, y, z                          - Cartesian position (m)
+ *   radial_distance, azimuth_angle, elevation_angle - spherical (m, rad)
+ *   radial_velocity                   - m/s
+ *   radar_cross_section               - dBsm
+ *   signal_noise_ratio                - dB
  *   radial_distance_error, azimuth_angle_error,
- *   elevation_angle_error, radial_velocity_error — variances
- *   existence_probability             — 1-100 (as float)
- *   multi_target_probability          — 0-100 (as float)
- *   detection_id                      — ID (as float)
- *   sensor_id                         — ID (as float)
- *   intensity                         — = radar_cross_section (RViz compat)
+ *   elevation_angle_error, radial_velocity_error - spec accuracy constants
+ *                                       (m, rad, rad, m/s), not variances
+ *   existence_probability             - 1-100 (as float)
+ *   multi_target_probability          - not on the wire, always 0
+ *   detection_id                      - ID (as float)
+ *   sensor_id                         - ID (as float)
+ *   intensity                         - = radar_cross_section (RViz compat)
  */
 
 #include "afi920_driver/pointcloud_builder.hpp"
@@ -163,7 +164,7 @@ sensor_msgs::msg::PointCloud2 PointCloudBuilder::build(
         *it_rcs = det.radar_cross_section;
         *it_snr = det.signal_to_noise_ratio;
 
-        // Variances
+        // Accuracy constants (m, rad, rad, m/s)
         *it_rde = det.position_radial_distance_error;
         *it_aze = det.position_azimuth_error;
         *it_ele = det.position_elevation_error;

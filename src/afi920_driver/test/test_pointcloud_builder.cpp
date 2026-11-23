@@ -524,10 +524,12 @@ TEST_F(PointCloudBuilderTest, NegativeRangeDetectionHandled) {
 }
 
 TEST_F(PointCloudBuilderTest, MaxDetectionsDoesNotOverflow) {
-    // Test with BTS_RDI_MAX_DETECTIONS (4096) — just verify it doesn't crash
-    // Don't actually allocate 4096 — just test the constant
-    EXPECT_EQ(BTS_RDI_MAX_DETECTIONS, 4096u);
-    EXPECT_EQ(BTS_RDI_MAX_PAYLOAD_SIZE, 36u + 51u * 4096u);
+    // Limits only: 2048 per v1.2.0 scan, 8192 for the single-message format.
+    // The largest single-message payload fits the 512 KB TCP receive buffer.
+    EXPECT_EQ(BTS_RDI_MAX_DETECTIONS, 2048u);
+    EXPECT_EQ(BTS_RDI_LEGACY_MAX_DETECTIONS, 8192u);
+    EXPECT_EQ(BTS_RDI_MAX_PAYLOAD_SIZE, 36u + 51u * 8192u);
+    EXPECT_LT(16u + 20u + BTS_RDI_MAX_PAYLOAD_SIZE, 512u * 1024u);
 }
 
 int main(int argc, char** argv)

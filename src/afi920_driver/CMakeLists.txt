@@ -130,6 +130,11 @@ if(BUILD_TESTING)
   ament_add_gtest(test_spi_parser test/test_spi_parser.cpp)
   target_link_libraries(test_spi_parser afi920_driver_lib)
   ament_target_dependencies(test_spi_parser ${DEPENDENCIES})
+
+  # Loopback only: parameter changes and TCP reconnect without a sensor.
+  ament_add_gtest(test_node_runtime test/test_node_runtime.cpp TIMEOUT 60)
+  target_link_libraries(test_node_runtime afi920_driver_lib)
+  ament_target_dependencies(test_node_runtime ${DEPENDENCIES})
 endif()
 
 ament_package()

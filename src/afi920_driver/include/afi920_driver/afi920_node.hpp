@@ -3,18 +3,18 @@
  * @file afi920_node.hpp
  * @brief ROS2 node for AFI920 4D Imaging Radar
  *
- * Handles UDP reception, SOME/IP parsing, and payload deserialization
- * directly — no external SDK dependency. Interface v1.0.x, v1.1.0 and
+ * Handles TCP/UDP stream reception, SOME/IP parsing, and payload
+ * deserialization directly - no external SDK dependency. Interface v1.0.x, v1.1.0 and
  * v1.2.0 sensors are supported; the E2E CRC, the RDI framing (single message
  * or v1.2.0 header/chunk messages) and the Config API format are detected
  * from the received frames.
  *
  * Published topics (all relative, namespace-prefixed):
- *   ~/PointCloud2  sensor_msgs/PointCloud2       (18 FLOAT32 fields)
- *   ~/RDI          afi920_msgs/DetectionArray     (full detection data)
- *   ~/SHI          afi920_msgs/HealthInfo         (sensor health)
- *   ~/SPI          afi920_msgs/SensorPerformance  (sensor performance)
- *   ~/E2E          afi920_msgs/E2eStatus          (E2E verdict per RDI/SHI/SPI message)
+ *   <ns>/PointCloud2  sensor_msgs/PointCloud2       (18 FLOAT32 fields)
+ *   <ns>/RDI          afi920_msgs/DetectionArray     (full detection data)
+ *   <ns>/SHI          afi920_msgs/HealthInfo         (sensor health)
+ *   <ns>/SPI          afi920_msgs/SensorPerformance  (sensor performance)
+ *   <ns>/E2E          afi920_msgs/E2eStatus          (E2E verdict per RDI/SHI/SPI message)
  */
 
 #ifndef AFI920_DRIVER__AFI920_NODE_HPP_
@@ -51,7 +51,7 @@
 
 namespace afi920_driver {
 
-/// E2E verdict of one received message, published on ~/E2E.
+/// E2E verdict of one received message, published on the E2E topic.
 struct E2eVerdict {
     E2eHeader header;
     E2eStatus status = E2eStatus::kOk;
@@ -168,6 +168,12 @@ private:
     // --- Parameter Management ---
     rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr params_cb_handle_;
     void declare_parameters();
+
+    /// Connect or bind one receiver at startup and log the result.
+    bool connect_receiver(StreamReceiver& rx, const char* name, int port);
+    /// Log connect, loss and failed reconnects of a TCP receiver.
+    void track_connection(StreamReceiver& rx, const char* name, int port,
+                          int n, bool& was_open);
     void read_parameters();
     rcl_interfaces::msg::SetParametersResult on_parameter_change(
         const std::vector<rclcpp::Parameter>& params);

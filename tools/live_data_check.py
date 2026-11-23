@@ -3,7 +3,8 @@
 
 This wrapper reuses the SDK live conformance suite so the ROS repo can verify
 the same real-radar contract without duplicating protocol test logic.
-It exercises only the public stream surface (RDI, SHII, SPI, CSII).
+It runs Discovery, Config API, RDI/SHII/SPI streams, SOME/IP/E2E integrity and
+CSII checks. The SDK suite targets interface v1.1.0 and v1.2.0 sensors.
 """
 
 from __future__ import annotations

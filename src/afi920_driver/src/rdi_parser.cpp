@@ -9,7 +9,8 @@ namespace afi920_driver {
 
 static constexpr size_t kRdiHeaderSize = BTS_RDI_HEADER_SIZE;
 static constexpr size_t kRdiDetectionSize = BTS_RDI_DETECTION_SIZE;
-static constexpr size_t kRdiMaxDetections = BTS_RDI_MAX_DETECTIONS;
+// Single-message format (interface v1.0.x and v1.1.0) protocol limit.
+static constexpr size_t kRdiMaxDetections = BTS_RDI_LEGACY_MAX_DETECTIONS;
 
 int RdiParser::Parse(const uint8_t* payload, size_t len, RdiFrame& frame)
 {
@@ -45,7 +46,9 @@ int RdiParser::Parse(const uint8_t* payload, size_t len, RdiFrame& frame)
 int RdiParser::ParseHeaderMessage(const uint8_t* body, size_t len,
                                   bts_rdi_message_t& msg, RdiListLayout& layout)
 {
-    if (!body || len != BTS_RDI_HEADER_MSG_SIZE) {
+    // A body shorter than 40 B is invalid (Interface Overview section 3.2.3);
+    // bytes after the first 40 B are ignored.
+    if (!body || len < BTS_RDI_HEADER_MSG_SIZE) {
         return -1;
     }
     ParseDetectionHeader(body, msg);

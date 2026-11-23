@@ -3,10 +3,10 @@ r"""
 AFI920 single sensor launch file.
 
 Publishes:
-    ~/PointCloud2  (sensor_msgs/PointCloud2)
-    ~/RDI          (afi920_msgs/DetectionArray)
-    ~/SHI          (afi920_msgs/HealthInfo)
-    ~/SPI          (afi920_msgs/SensorPerformance)
+    <ns>/PointCloud2  (sensor_msgs/PointCloud2)
+    <ns>/RDI          (afi920_msgs/DetectionArray)
+    <ns>/SHI          (afi920_msgs/HealthInfo)
+    <ns>/SPI          (afi920_msgs/SensorPerformance)
 
 Usage:
     # Default (single sensor):
@@ -86,7 +86,7 @@ def generate_launch_description():
         DeclareLaunchArgument('sensor_ip', default_value='192.168.10.150',
                               description='AFI920 sensor IP address'),
         DeclareLaunchArgument('data_port', default_value='30509',
-                              description='RDI data UDP port'),
+                              description='RDI data port (TCP or UDP per transport_mode)'),
         DeclareLaunchArgument('frame_id', default_value='afi920',
                               description='TF frame ID for messages'),
         DeclareLaunchArgument('parent_frame_id', default_value='base_link',
@@ -105,11 +105,11 @@ def generate_launch_description():
         DeclareLaunchArgument('min_existence_probability', default_value='0.0',
                               description='Minimum existence probability filter (0-100)'),
         DeclareLaunchArgument('publish_detections', default_value='true',
-                              description='Publish ~/RDI topic'),
+                              description='Publish RDI topic'),
         DeclareLaunchArgument('publish_health', default_value='true',
-                              description='Publish ~/SHI topic'),
+                              description='Publish SHI topic'),
         DeclareLaunchArgument('publish_performance', default_value='true',
-                              description='Publish ~/SPI topic'),
+                              description='Publish SPI topic'),
         DeclareLaunchArgument('transport_mode', default_value='tcp',
                               description='Data stream transport: tcp or udp'),
         DeclareLaunchArgument('validate_e2e', default_value='true',
@@ -122,12 +122,12 @@ def generate_launch_description():
         DeclareLaunchArgument('host_ip', default_value='auto',
                               description='Host IP for stream destination (auto-detect)'),
         DeclareLaunchArgument('shi_port', default_value='30510',
-                              description='SHII data UDP port'),
+                              description='SHII data port (TCP or UDP per transport_mode)'),
         DeclareLaunchArgument('spi_port', default_value='30511',
-                              description='SPI data UDP port'),
+                              description='SPI data port (TCP or UDP per transport_mode)'),
         DeclareLaunchArgument(
             'config_file', default_value='',
-            description='Path to YAML config file (overrides individual params)'),
+            description='Path to YAML config file (other arguments are then ignored)'),
 
         # --- Nodes ---
         node_with_config,

@@ -4,7 +4,7 @@
  * @brief ROS2 node for AFI920 4D Imaging Radar
  *
  * Directly handles:
- *   - UDP socket management and data reception (threaded)
+ *   - TCP/UDP stream reception (threaded; TCP by default)
  *   - SOME/IP header parsing and TP reassembly
  *   - RDI / SHII / SPI payload deserialization
  *   - PointCloud2 / DetectionArray / HealthInfo / SensorPerformance publishing
@@ -29,9 +29,10 @@ namespace afi920_driver {
 
 namespace {
 
-// RDI UDP receive timeout. The v1.2.0 scan timeout (100 ms) is checked after
-// each receive, so the receive must return well within it without traffic.
-constexpr int kRdiUdpTimeoutMs = 20;
+// RDI receive timeout (UDP receive timeout, TCP idle timeout). The v1.2.0 scan
+// timeout (100 ms) is checked after each receive, so the receive must return
+// well within it without traffic.
+constexpr int kRdiReceiveTimeoutMs = 20;
 
 uint64_t steady_now_ns()
 {
@@ -101,49 +102,42 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     // --- Create receivers ---
     if (transport_mode_ == "tcp") {
         rdi_receiver_ = std::make_unique<TcpStreamClient>(
-            sensor_ip_, static_cast<uint16_t>(data_port_), 512 * 1024);
+            sensor_ip_, static_cast<uint16_t>(data_port_), 512 * 1024, 5000,
+            kRdiReceiveTimeoutMs);
         shi_receiver_ = std::make_unique<TcpStreamClient>(
             sensor_ip_, static_cast<uint16_t>(shi_port_), 4 * 1024);
         spi_receiver_ = std::make_unique<TcpStreamClient>(
             sensor_ip_, static_cast<uint16_t>(spi_port_), 4 * 1024);
     } else {
         rdi_receiver_ = std::make_unique<UdpReceiver>(
-            static_cast<uint16_t>(data_port_), 16 * 1024 * 1024, kRdiUdpTimeoutMs);
+            static_cast<uint16_t>(data_port_), 16 * 1024 * 1024, kRdiReceiveTimeoutMs);
         shi_receiver_ = std::make_unique<UdpReceiver>(static_cast<uint16_t>(shi_port_));
         spi_receiver_ = std::make_unique<UdpReceiver>(static_cast<uint16_t>(spi_port_));
     }
-    // --- Connect receivers -- degraded mode on failure ---
-    int connected = 0;
-    if (rdi_receiver_->Connect() >= 0) {
-        connected++;
-    } else {
-        RCLCPP_WARN(get_logger(), "Failed to connect RDI receiver on port %d", data_port_);
-    }
-    if (publish_health_ && shi_receiver_->Connect() >= 0) {
-        connected++;
-    } else if (publish_health_) {
-        RCLCPP_WARN(get_logger(), "Failed to connect SHII receiver on port %d", shi_port_);
-    }
-    if (publish_performance_ && spi_receiver_->Connect() >= 0) {
-        connected++;
-    } else if (publish_performance_) {
-        RCLCPP_WARN(get_logger(), "Failed to connect SPI receiver on port %d", spi_port_);
-    }
-    if (connected == 0) {
-        RCLCPP_FATAL(get_logger(), "All receivers failed to connect -- shutting down");
+    // --- Connect receivers ---
+    // TCP: a receiver that cannot connect now keeps retrying in its thread with
+    // exponential backoff (1 s doubling to 30 s) for as long as the node runs.
+    // UDP: a port that cannot be bound is a local error and is not retried.
+    const bool tcp = (transport_mode_ == "tcp");
+    const bool rdi_ok = connect_receiver(*rdi_receiver_, "RDI", data_port_);
+    const bool shi_ok = publish_health_ && connect_receiver(*shi_receiver_, "SHII", shi_port_);
+    const bool spi_ok =
+        publish_performance_ && connect_receiver(*spi_receiver_, "SPI", spi_port_);
+    if (!tcp && !rdi_ok && !shi_ok && !spi_ok) {
+        RCLCPP_FATAL(get_logger(), "No UDP receive port could be bound -- shutting down");
         rclcpp::shutdown();
         return;
     }
 
     // --- Start threads ---
     running_.store(true);
-    if (rdi_receiver_->IsOpen()) {
+    if (tcp || rdi_ok) {
         rdi_thread_ = std::make_unique<std::thread>(&Afi920Node::rdi_thread_func, this);
     }
-    if (publish_health_ && shi_receiver_->IsOpen()) {
+    if (publish_health_ && (tcp || shi_ok)) {
         shi_thread_ = std::make_unique<std::thread>(&Afi920Node::shi_thread_func, this);
     }
-    if (publish_performance_ && spi_receiver_->IsOpen()) {
+    if (publish_performance_ && (tcp || spi_ok)) {
         spi_thread_ = std::make_unique<std::thread>(&Afi920Node::spi_thread_func, this);
     }
     // --- Parameter change callback ---
@@ -290,9 +284,11 @@ void Afi920Node::rdi_thread_func()
     const size_t buf_size = (transport_mode_ == "tcp") ? kTcpBufSize : kUdpBufSize;
     std::vector<uint8_t> buf(buf_size);
     uint32_t recv_count = 0;
+    bool was_open = rdi_receiver_->IsOpen();
 
     while (running_.load()) {
         int n = rdi_receiver_->Receive(buf.data(), buf_size);
+        track_connection(*rdi_receiver_, "RDI", data_port_, n, was_open);
         if (n > 0) {
             recv_count++;
             if (recv_count <= 3 || recv_count % 1000 == 0) {
@@ -313,9 +309,11 @@ void Afi920Node::shi_thread_func()
 
     static constexpr size_t kBufSize = 4 * 1024;
     std::vector<uint8_t> buf(kBufSize);
+    bool was_open = shi_receiver_->IsOpen();
 
     while (running_.load()) {
         int n = shi_receiver_->Receive(buf.data(), kBufSize);
+        track_connection(*shi_receiver_, "SHII", shi_port_, n, was_open);
         if (n <= 0) continue;
         process_shi_datagram(buf.data(), static_cast<size_t>(n));
     }
@@ -329,9 +327,11 @@ void Afi920Node::spi_thread_func()
 
     static constexpr size_t kBufSize = 4 * 1024;
     std::vector<uint8_t> buf(kBufSize);
+    bool was_open = spi_receiver_->IsOpen();
 
     while (running_.load()) {
         int n = spi_receiver_->Receive(buf.data(), kBufSize);
+        track_connection(*spi_receiver_, "SPI", spi_port_, n, was_open);
         if (n <= 0) continue;
         process_spi_datagram(buf.data(), static_cast<size_t>(n));
     }
@@ -387,7 +387,7 @@ bool Afi920Node::consume_e2e_header(const uint8_t*& payload, size_t& payload_len
     }
     const bool metadata_ok = verdict.length_ok && verdict.data_id_ok;
 
-    // CRC results are reported on ~/E2E and in the log; frames are never dropped on CRC.
+    // CRC results are reported on the E2E topic and in the log; frames are never dropped on CRC.
     if (status == E2eStatus::kCrcMismatch) {
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
             "%s E2E CRC mismatch (counter=%u, data_id=0x%08X)",
@@ -548,8 +548,10 @@ void Afi920Node::on_rdi_scan(RdiScan& scan)
 
     if (scan.chunks_rejected > 0) {
         RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 5000,
-            "RDI scan (E2E counter %u): %u chunk(s) rejected for size, MessageCounter "
-            "or ChunkCount mismatch", static_cast<unsigned int>(scan.e2e_counter),
+            "RDI scan (E2E counter %u): %u chunk(s) rejected (size, MessageCounter, "
+            "chunk index or slot not below ChunkCount, FirstEntityIndex not a multiple "
+            "of EntitiesPerChunk, EntityCount above EntitiesPerChunk, or duplicate slot)",
+            static_cast<unsigned int>(scan.e2e_counter),
             static_cast<unsigned int>(scan.chunks_rejected));
     }
     if (!scan.has_header) {
@@ -1006,6 +1008,47 @@ void Afi920Node::on_spi_message(const SpiMessage& msg, const E2eVerdict& verdict
                        msg.message_counter, static_cast<uint8_t>(msg.data_qualifier));
 }
 
+// Connection state
+
+bool Afi920Node::connect_receiver(StreamReceiver& rx, const char* name, int port)
+{
+    if (rx.Connect() >= 0) {
+        if (transport_mode_ == "tcp") {
+            RCLCPP_INFO(get_logger(), "%s connected to %s:%d", name, sensor_ip_.c_str(), port);
+        }
+        return true;
+    }
+    if (transport_mode_ == "tcp") {
+        RCLCPP_WARN(get_logger(),
+            "%s connect to %s:%d failed -- retrying every 1 s to 30 s until it connects",
+            name, sensor_ip_.c_str(), port);
+    } else {
+        RCLCPP_ERROR(get_logger(), "%s: cannot bind UDP port %d -- stream disabled", name, port);
+    }
+    return false;
+}
+
+void Afi920Node::track_connection(StreamReceiver& rx, const char* name, int port,
+                                  int n, bool& was_open)
+{
+    const bool open = rx.IsOpen();
+    if (open && !was_open) {
+        RCLCPP_INFO(get_logger(), "%s connected to %s:%d", name, sensor_ip_.c_str(), port);
+    } else if (!open && was_open && running_.load()) {
+        // The destructor clears running_ before Close(), so shutdown is not logged as a loss.
+        RCLCPP_WARN(get_logger(), "%s connection to %s:%d lost -- reconnecting",
+                    name, sensor_ip_.c_str(), port);
+    } else if (!open && n < 0 && running_.load()) {
+        // One line per failed attempt; attempts are spaced by the backoff.
+        const auto* tcp = dynamic_cast<const TcpStreamClient*>(&rx);
+        if (tcp) {
+            RCLCPP_WARN(get_logger(), "%s reconnect to %s:%d failed -- next attempt in %d s",
+                        name, sensor_ip_.c_str(), port, tcp->NextReconnectDelayMs() / 1000);
+        }
+    }
+    was_open = open;
+}
+
 // Dynamic parameters
 
 rcl_interfaces::msg::SetParametersResult Afi920Node::on_parameter_change(
@@ -1013,6 +1056,26 @@ rcl_interfaces::msg::SetParametersResult Afi920Node::on_parameter_change(
 {
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
+
+    // Only these parameters take effect at runtime. Any other parameter in the
+    // request rejects the whole request, so nothing is applied half-way.
+    static const char* const kDynamic[] = {
+        "frame_id", "min_range", "max_range", "min_snr",
+        "min_existence_probability", "validate_e2e", "e2e_strict"};
+    for (const auto& param : params) {
+        bool dynamic = false;
+        for (const char* name : kDynamic) {
+            if (param.get_name() == name) {
+                dynamic = true;
+                break;
+            }
+        }
+        if (!dynamic) {
+            result.successful = false;
+            result.reason = param.get_name() + " cannot be changed at runtime; restart the node";
+            return result;
+        }
+    }
 
     bool config_changed = false;
 

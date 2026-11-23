@@ -14,7 +14,11 @@
 using socket_t = SOCKET;
 static constexpr socket_t kInvalidSocket = INVALID_SOCKET;
 static inline void close_socket(socket_t s) { closesocket(s); }
+static inline void shutdown_socket(socket_t s) { ::shutdown(s, SD_BOTH); }
 static inline bool socket_valid(socket_t s) { return s != INVALID_SOCKET; }
+static inline socket_t to_socket(uintptr_t v) { return static_cast<socket_t>(v); }
+static inline uintptr_t from_socket(socket_t s) { return static_cast<uintptr_t>(s); }
+static constexpr uintptr_t kInvalidStored = static_cast<uintptr_t>(~0);
 #else
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -27,33 +31,39 @@ static inline bool socket_valid(socket_t s) { return s != INVALID_SOCKET; }
 using socket_t = int;
 static constexpr socket_t kInvalidSocket = -1;
 static inline void close_socket(socket_t s) { ::close(s); }
+static inline void shutdown_socket(socket_t s) { ::shutdown(s, SHUT_RDWR); }
 static inline bool socket_valid(socket_t s) { return s >= 0; }
+static inline socket_t to_socket(int v) { return v; }
+static inline int from_socket(socket_t s) { return s; }
+static constexpr int kInvalidStored = -1;
 #endif
 
 namespace afi920_driver {
 
+namespace {
+// Slice for connect and backoff waits, so Close() is noticed quickly.
+constexpr int kWaitSliceMs = 50;
+}  // namespace
+
 TcpStreamClient::TcpStreamClient(const std::string& sensor_ip, uint16_t port,
-                                 size_t recv_buf_size, int connect_timeout_ms)
+                                 size_t recv_buf_size, int connect_timeout_ms,
+                                 int idle_timeout_ms)
     : sensor_ip_(sensor_ip),
       port_(port),
       recv_buf_size_(recv_buf_size),
-      connect_timeout_ms_(connect_timeout_ms) {}
+      connect_timeout_ms_(connect_timeout_ms),
+      idle_timeout_ms_(idle_timeout_ms) {}
 
 TcpStreamClient::~TcpStreamClient() {
     Close();
 }
 
 int TcpStreamClient::Connect() {
-#ifdef _WIN32
-    socket_t fd = socket_fd_;
-    if (fd != static_cast<socket_t>(static_cast<uintptr_t>(~0))) {
-#else
-    int fd = socket_fd_;
-    if (fd >= 0) {
-#endif
-        close_socket(fd);
-        open_ = false;
+    socket_t old_fd = to_socket(socket_fd_.exchange(kInvalidStored));
+    if (socket_valid(old_fd)) {
+        close_socket(old_fd);
     }
+    open_ = false;
 
     socket_t new_fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (!socket_valid(new_fd)) {
@@ -91,20 +101,28 @@ int TcpStreamClient::Connect() {
     }
 #endif
 
-    // Wait for connect with timeout using select
-    fd_set wfds;
-    FD_ZERO(&wfds);
-    FD_SET(new_fd, &wfds);
-    struct timeval tv;
-    tv.tv_sec = connect_timeout_ms_ / 1000;
-    tv.tv_usec = (connect_timeout_ms_ % 1000) * 1000;
-
+    // Wait for connect in slices so Close() can stop it early.
+    int sel = 0;
+    int waited_ms = 0;
+    while (sel == 0 && waited_ms < connect_timeout_ms_ && running_) {
+        const int slice = std::min(kWaitSliceMs, connect_timeout_ms_ - waited_ms);
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(new_fd, &wfds);
+        struct timeval tv;
+        tv.tv_sec = slice / 1000;
+        tv.tv_usec = (slice % 1000) * 1000;
 #ifdef _WIN32
-    int sel = ::select(0, nullptr, &wfds, nullptr, &tv);
+        sel = ::select(0, nullptr, &wfds, nullptr, &tv);
 #else
-    int sel = ::select(static_cast<int>(new_fd) + 1, nullptr, &wfds, nullptr, &tv);
+        sel = ::select(static_cast<int>(new_fd) + 1, nullptr, &wfds, nullptr, &tv);
+        if (sel < 0 && errno == EINTR) {
+            sel = 0;
+        }
 #endif
-    if (sel <= 0) {
+        waited_ms += slice;
+    }
+    if (sel <= 0 || !running_) {
         close_socket(new_fd);
         return -1;
     }
@@ -128,12 +146,7 @@ int TcpStreamClient::Connect() {
     fcntl(new_fd, F_SETFL, blk_flags & ~O_NONBLOCK);
 #endif
 
-#ifdef _WIN32
-    socket_fd_ = static_cast<uintptr_t>(new_fd);
-#else
-    socket_fd_ = new_fd;
-#endif
-
+    socket_fd_ = from_socket(new_fd);
     configure_socket();
     open_ = true;
     reconnect_delay_ms_ = kMinReconnectDelay;
@@ -143,6 +156,19 @@ int TcpStreamClient::Connect() {
 int TcpStreamClient::Receive(uint8_t* buf, size_t buf_size) {
     if (!open_) {
         return try_reconnect();
+    }
+
+    // Return 0 when no message starts within the idle timeout, so the caller
+    // can run time-based work (the v1.2.0 RDI scan timeout) without traffic.
+    if (idle_timeout_ms_ > 0) {
+        int ready = wait_readable(idle_timeout_ms_);
+        if (ready == 0) {
+            return 0;
+        }
+        if (ready < 0) {
+            open_ = false;
+            return -1;
+        }
     }
 
     // Read exactly 8 bytes: SOME/IP header first half (MessageID[4] + Length[4])
@@ -160,7 +186,7 @@ int TcpStreamClient::Receive(uint8_t* buf, size_t buf_size) {
 
     size_t total = 8u + static_cast<size_t>(length);
     if (total > buf_size) {
-        // Buffer too small — drain and return error
+        // Buffer too small - drop the connection and return an error
         open_ = false;
         return -1;
     }
@@ -180,18 +206,12 @@ int TcpStreamClient::Receive(uint8_t* buf, size_t buf_size) {
 void TcpStreamClient::Close() {
     running_ = false;
     open_ = false;
-#ifdef _WIN32
-    socket_t fd = static_cast<socket_t>(socket_fd_);
-    if (fd != INVALID_SOCKET) {
+    socket_t fd = to_socket(socket_fd_.exchange(kInvalidStored));
+    if (socket_valid(fd)) {
+        // shutdown() wakes a recv() blocked on another thread before the close.
+        shutdown_socket(fd);
         close_socket(fd);
-        socket_fd_ = static_cast<uintptr_t>(~0);
     }
-#else
-    if (socket_fd_ >= 0) {
-        close_socket(socket_fd_);
-        socket_fd_ = -1;
-    }
-#endif
 }
 
 bool TcpStreamClient::IsOpen() const {
@@ -199,17 +219,20 @@ bool TcpStreamClient::IsOpen() const {
 }
 
 int TcpStreamClient::recv_exact(uint8_t* buf, size_t n) {
+    const socket_t fd = to_socket(socket_fd_.load());
+    if (!socket_valid(fd)) {
+        return -1;
+    }
     size_t received = 0;
     while (received < n) {
 #ifdef _WIN32
-        socket_t fd = static_cast<socket_t>(socket_fd_);
         int ret = ::recv(fd, reinterpret_cast<char*>(buf + received),
                          static_cast<int>(n - received), 0);
         if (ret <= 0) {
             return -1;
         }
 #else
-        ssize_t ret = ::recv(socket_fd_, buf + received, n - received, 0);
+        ssize_t ret = ::recv(fd, buf + received, n - received, 0);
         if (ret < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -223,12 +246,36 @@ int TcpStreamClient::recv_exact(uint8_t* buf, size_t n) {
     return 0;
 }
 
-void TcpStreamClient::configure_socket() {
+int TcpStreamClient::wait_readable(int timeout_ms) {
+    const socket_t fd = to_socket(socket_fd_.load());
+    if (!socket_valid(fd)) {
+        return -1;
+    }
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
 #ifdef _WIN32
-    socket_t fd = static_cast<socket_t>(socket_fd_);
+    int sel = ::select(0, &rfds, nullptr, nullptr, &tv);
+    if (sel == SOCKET_ERROR) {
+        return -1;
+    }
 #else
-    int fd = socket_fd_;
+    int sel = ::select(static_cast<int>(fd) + 1, &rfds, nullptr, nullptr, &tv);
+    if (sel < 0) {
+        return (errno == EINTR) ? 0 : -1;
+    }
 #endif
+    return (sel > 0) ? 1 : 0;
+}
+
+void TcpStreamClient::configure_socket() {
+    const socket_t fd = to_socket(socket_fd_.load());
+    if (!socket_valid(fd)) {
+        return;
+    }
 
     // TCP_NODELAY: disable Nagle's algorithm
     int flag = 1;
@@ -268,32 +315,34 @@ void TcpStreamClient::configure_socket() {
                reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
 }
 
+void TcpStreamClient::interruptible_sleep(int ms) const {
+    int slept = 0;
+    while (slept < ms && running_) {
+        const int slice = std::min(kWaitSliceMs, ms - slept);
+        std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+        slept += slice;
+    }
+}
+
 int TcpStreamClient::try_reconnect() {
     if (!running_) return -1;
 
-#ifdef _WIN32
-    socket_t fd = static_cast<socket_t>(socket_fd_);
-    if (fd != INVALID_SOCKET) {
+    socket_t fd = to_socket(socket_fd_.exchange(kInvalidStored));
+    if (socket_valid(fd)) {
         close_socket(fd);
-        socket_fd_ = static_cast<uintptr_t>(~0);
     }
-#else
-    if (socket_fd_ >= 0) {
-        close_socket(socket_fd_);
-        socket_fd_ = -1;
-    }
-#endif
     open_ = false;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(reconnect_delay_ms_));
+    interruptible_sleep(reconnect_delay_ms_);
+    if (!running_) return -1;
 
     if (Connect() == 0) {
         reconnect_delay_ms_ = kMinReconnectDelay;
         return 0;
     }
 
-    // Exponential backoff, cap at kMaxReconnectDelay
-    reconnect_delay_ms_ = std::min(reconnect_delay_ms_ * 2, kMaxReconnectDelay);
+    // Exponential backoff, cap at kMaxReconnectDelay. Retries never stop.
+    reconnect_delay_ms_ = std::min(reconnect_delay_ms_.load() * 2, kMaxReconnectDelay);
     return -1;
 }
 

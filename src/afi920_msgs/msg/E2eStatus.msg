@@ -1,4 +1,4 @@
-# E2E verification result of one received RDI / SHI / SPI message (~/E2E).
+# E2E verification result of one received RDI / SHI / SPI message (E2E topic).
 # header.stamp equals the header.stamp of the PointCloud2 / RDI / SHI / SPI
 # message published from the same sensor message, so the two can be paired
 # by exact time. When data_published is false no data message was published
@@ -23,12 +23,17 @@ uint8 CRC_FORMAT_CRC64_XZ=2            # sensor interface v1.0.x
 
 uint8 stream                           # STREAM_*
 uint8 result                           # RESULT_*
-uint8 crc_format                       # CRC_FORMAT_* (UNKNOWN unless result is RESULT_OK)
+uint8 crc_format                       # CRC_FORMAT_* (UNKNOWN when no message passed; on a v1.2.0
+                                       # scan it comes from the first passing message)
 bool length_ok                         # E2E Length equals the payload size
 bool data_id_ok                        # E2E Data ID matches the stream
 uint32 e2e_counter                     # E2E Counter
-uint32 missing_before                  # E2E Counter values skipped since the previous message
-bool sensor_restarted                  # E2E Counter decreased (sensor restart)
-bool data_published                    # false: dropped by e2e_strict or payload parse failure
+uint32 missing_before                  # E2E Counter values skipped since the previous message; includes
+                                       # cycles the sensor did not send, not only lost messages
+bool sensor_restarted                  # E2E Counter decreased (sensor restart; on interface v1.0.x a TCP
+                                       # reconnect also restarts the counter)
+bool data_published                    # false: no data message was published (e2e_strict drop, parse failure,
+                                       # v1.2.0 scan without header, or nothing enabled for this frame,
+                                       # e.g. publish_detections false and DataQualifier 1 or 6)
 uint32 message_counter                 # ISO 23150 MessageCounter (0 when not parsed)
 uint8 data_qualifier                   # ISO 23150 DataQualifier (0 when not parsed)
