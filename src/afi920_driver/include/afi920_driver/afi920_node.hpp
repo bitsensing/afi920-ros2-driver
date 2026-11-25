@@ -36,15 +36,16 @@
 // cppcheck 1.90 (Foxy) cannot evaluate __has_include, hence the suppression.
 #ifdef __has_include
 // cppcheck-suppress preprocessorErrorDirective
-#  if __has_include(<tf2_ros/transform_broadcaster.hpp>)
-#    define AFI920_HAS_TF2_ROS_BROADCASTER_HPP 1
+#  if __has_include(<tf2_ros/static_transform_broadcaster.hpp>)
+#    define AFI920_HAS_TF2_ROS_STATIC_BROADCASTER_HPP 1
 #  endif
 #endif
-#ifdef AFI920_HAS_TF2_ROS_BROADCASTER_HPP
-#include <tf2_ros/transform_broadcaster.hpp>
+#ifdef AFI920_HAS_TF2_ROS_STATIC_BROADCASTER_HPP
+#include <tf2_ros/static_transform_broadcaster.hpp>
 #else
-#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #endif
+#include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include <afi920_msgs/msg/detection_array.hpp>
 #include <afi920_msgs/msg/e2e_status.hpp>
@@ -136,8 +137,11 @@ private:
     rclcpp::Publisher<afi920_msgs::msg::E2eStatus>::SharedPtr pub_e2e_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pub_marker_;
 
-    // --- TF: broadcasts parent_frame -> frame_id using SPI sensor mounting pose ---
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    // --- TF: parent_frame -> frame_id from the SPI sensor mounting pose, sent on
+    // /tf_static when it first arrives and whenever it changes (SPI thread only) ---
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
+    geometry_msgs::msg::TransformStamped last_tf_;
+    bool tf_sent_ = false;
 
     // --- Statistics ---
     std::atomic<uint64_t> rdi_frame_count_{0};

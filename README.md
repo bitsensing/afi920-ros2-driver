@@ -201,7 +201,7 @@ Example: with the default namespace, `PointCloud2` is published as `/afi920/Poin
 
 All topics are published with `SensorDataQoS` (best effort). A subscriber with the default reliable QoS receives nothing; subscribe with `rclcpp::SensorDataQoS()` (C++) or `qos_profile_sensor_data` (Python).
 
-When `publish_tf` is `true` (default), the driver also broadcasts the sensor mounting pose from each SPI message on `/tf` as the transform `parent_frame_id → frame_id` (default `base_link → afi920`). The pose is not broadcast when `publish_performance` is `false`.
+When `publish_tf` is `true` (default), the driver also publishes the sensor mounting pose from SPI on `/tf_static` as the transform `parent_frame_id → frame_id` (default `base_link → afi920`), when the first SPI message arrives and whenever the pose changes. The pose is not broadcast when `publish_performance` is `false`.
 
 ## PointCloud2 Fields
 
@@ -357,7 +357,7 @@ AFI920 Sensor
    ├─ SHI
    ├─ SPI
    ├─ E2E
-   └─ /tf (sensor pose)
+   └─ /tf_static (sensor pose)
           │
           ▼
    RViz2 / ROS 2 Applications

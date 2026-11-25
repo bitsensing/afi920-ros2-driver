@@ -93,7 +93,7 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     // --- TF broadcaster (mounting pose from SPI) ---
     if (publish_tf_) {
         if (publish_performance_) {
-            tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+            tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
             RCLCPP_INFO(get_logger(),
                 "TF broadcast enabled: %s -> %s (from SPI sensor pose)",
                 parent_frame_id_.c_str(), frame_id_.c_str());
@@ -1011,6 +1011,8 @@ void Afi920Node::on_spi_message(const SpiMessage& msg, const E2eVerdict& verdict
     // Broadcast mounting pose as TF: parent_frame -> frame_id.
     // Lets RViz/consumers place each sensor's cloud at its calibrated position
     // when the fixed frame is set to parent_frame_id (e.g. base_link).
+    // The pose is a configured value, so it goes on /tf_static, sent when it first
+    // arrives and whenever it changes; a lookup at any PointCloud2 stamp succeeds.
     if (tf_broadcaster_) {
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp = stamp;
@@ -1030,7 +1032,15 @@ void Afi920Node::on_spi_message(const SpiMessage& msg, const E2eVerdict& verdict
         tf.transform.rotation.z = q.z();
         tf.transform.rotation.w = q.w();
 
-        tf_broadcaster_->sendTransform(tf);
+        const bool changed = !tf_sent_ ||
+            tf.child_frame_id != last_tf_.child_frame_id ||
+            tf.transform.translation != last_tf_.transform.translation ||
+            tf.transform.rotation != last_tf_.transform.rotation;
+        if (changed) {
+            tf_broadcaster_->sendTransform(tf);
+            last_tf_ = tf;
+            tf_sent_ = true;
+        }
     }
 
     pub_spi_->publish(std::move(sp));

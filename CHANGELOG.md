@@ -15,6 +15,10 @@ The driver can publish a point cloud that Isaac ROS NITROS point cloud nodes acc
 - **afi920_isaac.launch.py** — Starts the driver with `PointCloud2XYZI` and the Isaac ROS `PointCloudToFlatScanNode` and `FlatScantoLaserScanNode` (`<ns>/flatscan`, `<ns>/scan`), with `input_qos: SENSOR_DATA` and z bounds of ±1000 m. Isaac ROS is needed at run time only; the package does not depend on it. Verified with Isaac ROS 4.1 on DGX Spark (Ubuntu 24.04, aarch64, Jazzy).
 - **afi920.launch.py, config.yaml, default_params.yaml** — Gain `publish_pointcloud_xyzi` and `xyzi_pad_multiple`.
 
+### Fixes
+
+- **Sensor pose TF on /tf_static** — The mounting pose `parent_frame_id → frame_id` is published on `/tf_static` when the first SPI message arrives and whenever the pose or `frame_id` changes, instead of on `/tf` with every SPI message. The `/tf` transform carried the SPI reception time, up to one SPI period (100 ms) older than the `PointCloud2` stamps, so a transform at a `PointCloud2` stamp failed with an extrapolation error and RViz with Fixed Frame `base_link` alternated between OK and Error.
+
 ---
 
 ## v2.2.0

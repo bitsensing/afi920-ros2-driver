@@ -196,7 +196,7 @@ sudo ip addr add 192.168.10.100/24 dev eth0
 
 모든 토픽은 `SensorDataQoS`(best effort)로 발행합니다. 기본 reliable QoS로 구독하면 메시지를 받지 못하므로 `rclcpp::SensorDataQoS()`(C++) 또는 `qos_profile_sensor_data`(Python)로 구독하세요.
 
-`publish_tf`가 `true`(기본값)이면 드라이버는 SPI 메시지마다 수신한 센서 장착 자세를 `/tf`에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 송출합니다. `publish_performance`가 `false`이면 자세를 송출하지 않습니다.
+`publish_tf`가 `true`(기본값)이면 드라이버는 SPI로 수신한 센서 장착 자세를 `/tf_static`에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 송출합니다. 첫 SPI 메시지를 받을 때와 자세가 바뀔 때 송출합니다. `publish_performance`가 `false`이면 자세를 송출하지 않습니다.
 
 ## PointCloud2 Fields
 
@@ -352,7 +352,7 @@ AFI920 Sensor
    ├─ SHI
    ├─ SPI
    ├─ E2E
-   └─ /tf (센서 자세)
+   └─ /tf_static (센서 자세)
           │
           ▼
    RViz2 / ROS 2 Applications
