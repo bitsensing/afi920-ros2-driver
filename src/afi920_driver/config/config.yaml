@@ -29,6 +29,8 @@
     publish_detections: true      # Publish RDI DetectionArray
     publish_health: true          # Publish SHI HealthInfo
     publish_performance: true     # Publish SPI SensorPerformance
+    publish_pointcloud_xyzi: false  # Publish PointCloud2XYZI (x/y/z/intensity, 16 B/point, Isaac ROS)
+    xyzi_pad_multiple: 16         # Pad PointCloud2XYZI with z=+inf points to this multiple (0: off)
     transport_mode: "tcp"         # Data stream transport: "tcp" or "udp"
     validate_e2e: true            # Validate E2E CRC on RDI/SHII/SPI (results on E2E, no drop)
     e2e_strict: false             # Drop E2E Length/Data ID mismatches when true

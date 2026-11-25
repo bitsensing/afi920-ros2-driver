@@ -4,7 +4,8 @@ AFI920 single sensor launch file.
 
 Publishes:
     <ns>/PointCloud2  (sensor_msgs/PointCloud2)
-    <ns>/RDI          (afi920_msgs/DetectionArray)
+    <ns>/PointCloud2XYZI (sensor_msgs/PointCloud2, publish_pointcloud_xyzi:=true)
+    <ns>/RDI         (afi920_msgs/DetectionArray)
     <ns>/SHI          (afi920_msgs/HealthInfo)
     <ns>/SPI          (afi920_msgs/SensorPerformance)
 
@@ -69,6 +70,8 @@ def generate_launch_description():
             'publish_detections': LaunchConfiguration('publish_detections'),
             'publish_health': LaunchConfiguration('publish_health'),
             'publish_performance': LaunchConfiguration('publish_performance'),
+            'publish_pointcloud_xyzi': LaunchConfiguration('publish_pointcloud_xyzi'),
+            'xyzi_pad_multiple': LaunchConfiguration('xyzi_pad_multiple'),
             'transport_mode': LaunchConfiguration('transport_mode'),
             'validate_e2e': LaunchConfiguration('validate_e2e'),
             'e2e_strict': LaunchConfiguration('e2e_strict'),
@@ -110,6 +113,12 @@ def generate_launch_description():
                               description='Publish SHI topic'),
         DeclareLaunchArgument('publish_performance', default_value='true',
                               description='Publish SPI topic'),
+        DeclareLaunchArgument('publish_pointcloud_xyzi', default_value='false',
+                              description='Publish PointCloud2XYZI (x/y/z/intensity, '
+                                          '16 B/point, for Isaac ROS)'),
+        DeclareLaunchArgument('xyzi_pad_multiple', default_value='16',
+                              description='Pad PointCloud2XYZI to a multiple of this '
+                                          'point count with z=+inf points (0: off)'),
         DeclareLaunchArgument('transport_mode', default_value='tcp',
                               description='Data stream transport: tcp or udp'),
         DeclareLaunchArgument('validate_e2e', default_value='true',

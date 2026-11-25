@@ -11,6 +11,8 @@
  *
  * Published topics (all relative, namespace-prefixed):
  *   <ns>/PointCloud2  sensor_msgs/PointCloud2       (18 FLOAT32 fields)
+ *   <ns>/PointCloud2XYZI sensor_msgs/PointCloud2    (x/y/z/intensity, 16 B/point;
+ *                                                    publish_pointcloud_xyzi only)
  *   <ns>/RDI          afi920_msgs/DetectionArray     (full detection data)
  *   <ns>/SHI          afi920_msgs/HealthInfo         (sensor health)
  *   <ns>/SPI          afi920_msgs/SensorPerformance  (sensor performance)
@@ -34,15 +36,16 @@
 // cppcheck 1.90 (Foxy) cannot evaluate __has_include, hence the suppression.
 #ifdef __has_include
 // cppcheck-suppress preprocessorErrorDirective
-#  if __has_include(<tf2_ros/transform_broadcaster.hpp>)
-#    define AFI920_HAS_TF2_ROS_BROADCASTER_HPP 1
+#  if __has_include(<tf2_ros/static_transform_broadcaster.hpp>)
+#    define AFI920_HAS_TF2_ROS_STATIC_BROADCASTER_HPP 1
 #  endif
 #endif
-#ifdef AFI920_HAS_TF2_ROS_BROADCASTER_HPP
-#include <tf2_ros/transform_broadcaster.hpp>
+#ifdef AFI920_HAS_TF2_ROS_STATIC_BROADCASTER_HPP
+#include <tf2_ros/static_transform_broadcaster.hpp>
 #else
-#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #endif
+#include <geometry_msgs/msg/transform_stamped.hpp>
 
 #include <afi920_msgs/msg/detection_array.hpp>
 #include <afi920_msgs/msg/e2e_status.hpp>
@@ -97,6 +100,8 @@ private:
     std::atomic<bool> publish_detections_{true};
     bool publish_health_;
     bool publish_performance_;
+    bool publish_pointcloud_xyzi_;
+    uint32_t xyzi_pad_multiple_;
     std::string transport_mode_;
     std::atomic<bool> validate_e2e_{true};
     std::atomic<bool> e2e_strict_{false};
@@ -125,14 +130,18 @@ private:
     mutable std::mutex config_mutex_;  // protects pc_builder_ config updates vs SDK reads
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_pointcloud_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_pointcloud_xyzi_;
     rclcpp::Publisher<afi920_msgs::msg::DetectionArray>::SharedPtr pub_rdi_;
     rclcpp::Publisher<afi920_msgs::msg::HealthInfo>::SharedPtr pub_shi_;
     rclcpp::Publisher<afi920_msgs::msg::SensorPerformance>::SharedPtr pub_spi_;
     rclcpp::Publisher<afi920_msgs::msg::E2eStatus>::SharedPtr pub_e2e_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pub_marker_;
 
-    // --- TF: broadcasts parent_frame -> frame_id using SPI sensor mounting pose ---
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    // --- TF: parent_frame -> frame_id from the SPI sensor mounting pose, sent on
+    // /tf_static when it first arrives and whenever it changes (SPI thread only) ---
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
+    geometry_msgs::msg::TransformStamped last_tf_;
+    bool tf_sent_ = false;
 
     // --- Statistics ---
     std::atomic<uint64_t> rdi_frame_count_{0};

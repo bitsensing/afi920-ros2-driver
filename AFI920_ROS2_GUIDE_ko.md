@@ -64,6 +64,7 @@ afi920-ros2-driver/
 │       ├── config/                 ← 파라미터 YAML, afi920.rviz, multi_sensor.rviz, dds_profile.xml
 │       └── launch/
 │           ├── afi920.launch.py        ← 단일 센서
+│           ├── afi920_isaac.launch.py  ← 단일 센서 + Isaac ROS pointcloud_utils
 │           └── multi_sensor.launch.py  ← 센서 4개 (front, rear, left, right)
 └── tools/
     ├── live_data_check.py   ← 엔드투엔드 센서 검증
@@ -149,6 +150,33 @@ ros2 topic echo /afi920/SPI --once
 ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 2 = CRC-64/XZ
 ```
 
+### Isaac ROS 파이프라인 (afi920_isaac.launch.py)
+
+`afi920_isaac.launch.py`는 드라이버를 `publish_pointcloud_xyzi:=true`로 실행하고, Isaac ROS `isaac_ros_pointcloud_utils`의 `PointCloudToFlatScanNode`와 `FlatScantoLaserScanNode`를 component container로 함께 실행합니다. Isaac ROS는 실행 시에만 필요하며, 드라이버 패키지는 Isaac ROS에 의존하지 않습니다. DGX Spark(Ubuntu 24.04, aarch64, Jazzy)의 Isaac ROS 4.1(`ros-jazzy-isaac-ros-pointcloud-utils`)에서 검증했습니다.
+
+```bash
+ros2 launch afi920_driver afi920_isaac.launch.py sensor_ip:=192.168.10.150
+ros2 topic hz /afi920/flatscan   # ~10 Hz 예상
+ros2 topic hz /afi920/scan       # sensor_msgs/LaserScan
+```
+
+| 인자 | 기본값 | 설명 |
+|---|---|---|
+| `namespace` | `afi920` | 드라이버와 Isaac ROS 노드의 네임스페이스 |
+| `sensor_ip`, `host_ip`, `data_port`, `shi_port`, `spi_port`, `transport_mode`, `frame_id` | `afi920.launch.py`와 같음 | 드라이버에 전달 |
+| `min_z`, `max_z` | `-1000.0`, `1000.0` | `frame_id` 기준 FlatScan z 범위 (m) |
+| `max_range_fallback` | `300.0` | LaserScan `range_max` (m) |
+
+DGX Spark에서 측정한 Isaac ROS 4.1 point cloud 입력 조건은 다음과 같습니다.
+
+| 조건 | Isaac ROS 4.1 동작 | 처리 |
+|---|---|---|
+| 점 구조 | 12 B(x/y/z)와 16 B 점만 변환됩니다. 72 B `PointCloud2` 구조는 `cudaMemcpy`에서 실패하고 노드가 종료됩니다 | `PointCloud2XYZI`는 16 B 점을 사용합니다 |
+| 점 개수 | `PointCloudToFlatScanNode`는 앞쪽 floor(N/16)×16개 점만 처리합니다 | `xyzi_pad_multiple` 16으로 `z = +inf` 점을 채우며, 이 점은 `max_z`에서 제외됩니다 |
+| 빈 입력 | `min_z`..`max_z` 안에 점이 하나도 없으면 노드가 종료됩니다(`GXF_ARGUMENT_OUT_OF_RANGE`) | 점이 없는 프레임은 발행하지 않으며, `min_z`/`max_z` 기본값은 ±1000 m입니다 |
+| QoS | Isaac ROS 노드는 기본적으로 reliable로 구독합니다 | launch 파일이 `input_qos: SENSOR_DATA`를 지정합니다 |
+| z 범위 | `PointCloudToFlatScanNode` 기본값은 ±0.1 m입니다 | launch 파일이 `min_z`/`max_z`를 지정합니다 |
+
 ---
 
 ## 6. 발행 토픽
@@ -159,6 +187,7 @@ ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 
 | 토픽 (절대 경로) | 메시지 타입 | QoS | 주기 |
 |---|---|---|---|
 | `/afi920/PointCloud2` | `sensor_msgs/PointCloud2` | SensorDataQoS | 10 Hz |
+| `/afi920/PointCloud2XYZI` | `sensor_msgs/PointCloud2` | SensorDataQoS | 10 Hz (`publish_pointcloud_xyzi:=true`일 때만) |
 | `/afi920/RDI` | `afi920_msgs/DetectionArray` | SensorDataQoS | 10 Hz |
 | `/afi920/SHI` | `afi920_msgs/HealthInfo` | SensorDataQoS | 10 Hz |
 | `/afi920/SPI` | `afi920_msgs/SensorPerformance` | SensorDataQoS | 10 Hz |
@@ -173,7 +202,9 @@ ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 
 
 **E2E:** E2E 헤더를 가진 RDI/SHI/SPI 수신 메시지마다 `E2eStatus` 메시지 1건을 발행하며, `e2e_strict`로 폐기한 프레임도 포함합니다. 인터페이스 v1.2.0 RDI는 스캔당 1건을 발행하며, 이미 닫힌 스캔의 늦은 메시지는 버리고 보고하지 않습니다. `publish_health`나 `publish_performance`가 `false`이면 SHI나 SPI를 수신하지 않으므로 보고도 없습니다. `header.stamp`는 대응하는 `PointCloud2`/`RDI`/`SHI`/`SPI` 메시지의 stamp와 같으므로 두 메시지를 시각으로 정확히 짝지을 수 있습니다. [§9](#afi920_msgse2estatus--메시지별-e2e-판정) 참고.
 
-**TF 브로드캐스트:** `publish_tf`가 `true`(기본값)이고 `publish_performance`가 `true`이면, 노드는 각 SPI 프레임에서 받은 센서 장착 포즈를 `/tf`(`tf2_msgs/TFMessage`)에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 브로드캐스트합니다. 고정 프레임(fixed frame)을 `parent_frame_id`로 설정하면 RViz/소비자가 각 센서의 클라우드를 장착 위치에 배치할 수 있습니다. 이 자세는 auto-alignment 보정을 반영하지 않은 설정 장착 자세이며, 센서가 설정을 적용하기 전에는 모든 값이 0입니다. `publish_performance`가 `false`이면 SPI 포즈가 없으므로 TF는 브로드캐스트되지 않습니다(경고 로그 출력).
+**TF 브로드캐스트:** `publish_tf`가 `true`(기본값)이고 `publish_performance`가 `true`이면, 노드는 SPI로 받은 센서 장착 포즈를 `/tf_static`(`tf2_msgs/TFMessage`, transient local)에 `parent_frame_id → frame_id` 변환(기본 `base_link → afi920`)으로 송출합니다. 첫 SPI 프레임을 받을 때와 포즈 또는 `frame_id`가 바뀔 때 송출합니다. 정적 변환은 시각과 무관하게 유효하므로 `PointCloud2`를 자신의 stamp 기준으로 변환할 수 있습니다. 고정 프레임(fixed frame)을 `parent_frame_id`로 설정하면 RViz/소비자가 각 센서의 클라우드를 장착 위치에 배치할 수 있습니다. 이 자세는 auto-alignment 보정을 반영하지 않은 설정 장착 자세이며, 센서가 설정을 적용하기 전에는 모든 값이 0입니다. `publish_performance`가 `false`이면 SPI 포즈가 없으므로 TF는 브로드캐스트되지 않습니다(경고 로그 출력).
+
+**PointCloud2XYZI:** `publish_pointcloud_xyzi`가 `true`일 때만 발행합니다(기본값 `false`). `PointCloud2`의 점을 FLOAT32 필드 `x`, `y`, `z`, `intensity` 4개(점당 16 B)로 담으며, header와 필터는 `PointCloud2`와 같습니다. 점이 없는 프레임은 이 토픽에 발행하지 않습니다. `xyzi_pad_multiple`이 1보다 크면(기본값 16) 점 개수를 그 배수로 맞추기 위해 `x = y = 0`, `z = +inf` 점을 채우고, 이때 `is_dense`는 `false`입니다. 구독 측은 이 점을 비유한(non-finite) 점으로 제외합니다. 이 토픽은 Isaac ROS NITROS point cloud 노드 연동용입니다. [§5 Isaac ROS 파이프라인](#isaac-ros-파이프라인-afi920_isaaclaunchpy)을 참고하세요.
 
 **좌표 규약:** 센서 프레임 FLU (X=전방, Y=좌측, Z=상방) — REP-103 준수
 
@@ -202,6 +233,8 @@ ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 
 | `publish_detections` | bool | `true` | `RDI` 토픽 발행 |
 | `publish_health` | bool | `true` | `SHI` 토픽 발행 |
 | `publish_performance` | bool | `true` | `SPI` 토픽 발행 |
+| `publish_pointcloud_xyzi` | bool | `false` | `PointCloud2XYZI`(x/y/z/intensity, 점당 16 B) 토픽 발행 |
+| `xyzi_pad_multiple` | int | `16` | `PointCloud2XYZI` 점 개수를 이 값의 배수로 맞추도록 `z = +inf` 점을 채움. `0` 또는 `1`이면 채우지 않습니다 |
 
 ### TF 설정 (동적 변경 불가)
 
@@ -249,6 +282,8 @@ ros2 launch afi920_driver afi920.launch.py \
     publish_detections:=true \
     publish_health:=true \
     publish_performance:=true \
+    publish_pointcloud_xyzi:=false \
+    xyzi_pad_multiple:=16 \
     validate_e2e:=true \
     e2e_strict:=false \
     config_file:=""

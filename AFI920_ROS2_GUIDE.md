@@ -64,6 +64,7 @@ afi920-ros2-driver/
 │       ├── config/                 ← parameter YAML, afi920.rviz, multi_sensor.rviz, dds_profile.xml
 │       └── launch/
 │           ├── afi920.launch.py        ← single sensor
+│           ├── afi920_isaac.launch.py  ← single sensor + Isaac ROS pointcloud_utils
 │           └── multi_sensor.launch.py  ← four sensors (front, rear, left, right)
 └── tools/
     ├── live_data_check.py   ← end-to-end sensor verification
@@ -149,6 +150,33 @@ ros2 topic echo /afi920/SPI --once
 ros2 topic echo /afi920/E2E --once      # result 0 = OK, crc_format 1 = CRC-32, 2 = CRC-64/XZ
 ```
 
+### Isaac ROS pipeline (afi920_isaac.launch.py)
+
+`afi920_isaac.launch.py` starts the driver with `publish_pointcloud_xyzi:=true` and a component container with the Isaac ROS `isaac_ros_pointcloud_utils` nodes `PointCloudToFlatScanNode` and `FlatScantoLaserScanNode`. Isaac ROS is needed at run time only; the driver package does not depend on it. Verified with Isaac ROS 4.1 (`ros-jazzy-isaac-ros-pointcloud-utils`) on DGX Spark (Ubuntu 24.04, aarch64, Jazzy).
+
+```bash
+ros2 launch afi920_driver afi920_isaac.launch.py sensor_ip:=192.168.10.150
+ros2 topic hz /afi920/flatscan   # expect ~10 Hz
+ros2 topic hz /afi920/scan       # sensor_msgs/LaserScan
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `namespace` | `afi920` | Namespace of the driver and the Isaac ROS nodes |
+| `sensor_ip`, `host_ip`, `data_port`, `shi_port`, `spi_port`, `transport_mode`, `frame_id` | as `afi920.launch.py` | Passed to the driver |
+| `min_z`, `max_z` | `-1000.0`, `1000.0` | FlatScan z bounds in `frame_id` (m) |
+| `max_range_fallback` | `300.0` | LaserScan `range_max` (m) |
+
+Isaac ROS 4.1 point cloud input conditions, measured on DGX Spark:
+
+| Condition | Isaac ROS 4.1 behaviour | Handling |
+|---|---|---|
+| Point layout | Only 12 B (x/y/z) and 16 B points convert; the 72 B `PointCloud2` layout fails in `cudaMemcpy` and the node terminates | `PointCloud2XYZI` uses 16 B points |
+| Point count | `PointCloudToFlatScanNode` processes only the first floor(N/16)×16 points | `xyzi_pad_multiple` 16 pads with `z = +inf` points, which `max_z` drops |
+| Empty input | A cloud with no point inside `min_z`..`max_z` terminates the node (`GXF_ARGUMENT_OUT_OF_RANGE`) | Frames without points are not published; `min_z`/`max_z` default to ±1000 m |
+| QoS | Isaac ROS nodes subscribe as reliable by default | The launch file sets `input_qos: SENSOR_DATA` |
+| z bounds | `PointCloudToFlatScanNode` defaults to ±0.1 m | The launch file sets `min_z`/`max_z` |
+
 ---
 
 ## 6. Published Topics
@@ -159,6 +187,7 @@ Topic names are declared as relative names (e.g. `PointCloud2`), so the namespac
 | Topic (absolute) | Message type | QoS | Rate |
 |---|---|---|---|
 | `/afi920/PointCloud2` | `sensor_msgs/PointCloud2` | SensorDataQoS | 10 Hz |
+| `/afi920/PointCloud2XYZI` | `sensor_msgs/PointCloud2` | SensorDataQoS | 10 Hz (`publish_pointcloud_xyzi:=true` only) |
 | `/afi920/RDI` | `afi920_msgs/DetectionArray` | SensorDataQoS | 10 Hz |
 | `/afi920/SHI` | `afi920_msgs/HealthInfo` | SensorDataQoS | 10 Hz |
 | `/afi920/SPI` | `afi920_msgs/SensorPerformance` | SensorDataQoS | 10 Hz |
@@ -173,7 +202,9 @@ Topic names are declared as relative names (e.g. `PointCloud2`), so the namespac
 
 **E2E:** one `E2eStatus` message is published for every received RDI/SHI/SPI message that carries an E2E header, including frames dropped by `e2e_strict`. On interface v1.2.0, RDI is reported once per scan; a late message of an already closed scan is ignored and not reported. SHI and SPI are not received, and so not reported, when `publish_health` or `publish_performance` is `false`. Its `header.stamp` equals the stamp of the matching `PointCloud2`/`RDI`/`SHI`/`SPI` message, so the two can be paired by exact time. See [§9](#afi920_msgse2estatus--per-message-e2e-result).
 
-**TF broadcast:** when `publish_tf` is `true` (default) and `publish_performance` is `true`, the node broadcasts the sensor mounting pose received in each SPI frame to `/tf` (`tf2_msgs/TFMessage`) as the transform `parent_frame_id → frame_id` (default `base_link → afi920`). This lets RViz/consumers place each sensor's cloud at its mounting position when the fixed frame is set to `parent_frame_id`. The pose is the configured mounting pose without auto-alignment correction, and is all zero until the sensor has applied its configuration. If `publish_performance` is `false`, no SPI pose is available and TF is not broadcast (a warning is logged).
+**TF broadcast:** when `publish_tf` is `true` (default) and `publish_performance` is `true`, the node publishes the sensor mounting pose received in SPI to `/tf_static` (`tf2_msgs/TFMessage`, transient local) as the transform `parent_frame_id → frame_id` (default `base_link → afi920`), when the first SPI frame arrives and whenever the pose or `frame_id` changes. A static transform is valid at any stamp, so a `PointCloud2` can be transformed at its own stamp. This lets RViz/consumers place each sensor's cloud at its mounting position when the fixed frame is set to `parent_frame_id`. The pose is the configured mounting pose without auto-alignment correction, and is all zero until the sensor has applied its configuration. If `publish_performance` is `false`, no SPI pose is available and TF is not broadcast (a warning is logged).
+
+**PointCloud2XYZI:** published only when `publish_pointcloud_xyzi` is `true` (default `false`). It carries the points of `PointCloud2` with four FLOAT32 fields `x`, `y`, `z`, `intensity` (16 B/point), the same header and the same filters. Frames without points are not published on it. When `xyzi_pad_multiple` is above 1 (default 16), the point count is padded up to a multiple of it with points at `x = y = 0`, `z = +inf`, and `is_dense` is then `false`; consumers drop them as non-finite points. The topic is meant for Isaac ROS NITROS point cloud nodes; see [§5 Isaac ROS pipeline](#isaac-ros-pipeline-afi920_isaaclaunchpy).
 
 **Coordinate convention:** sensor-frame FLU (X forward, Y left, Z up) — REP-103 compliant.
 
@@ -202,6 +233,8 @@ Parameters marked "not dynamic" are read once at startup. `ros2 param set` on th
 | `publish_detections` | bool | `true` | Publish `RDI` topic |
 | `publish_health` | bool | `true` | Publish `SHI` topic |
 | `publish_performance` | bool | `true` | Publish `SPI` topic |
+| `publish_pointcloud_xyzi` | bool | `false` | Publish `PointCloud2XYZI` (x/y/z/intensity, 16 B/point) |
+| `xyzi_pad_multiple` | int | `16` | Pad `PointCloud2XYZI` to a multiple of this point count with `z = +inf` points; `0` or `1` turns padding off |
 
 ### TF (not dynamic)
 
@@ -249,6 +282,8 @@ ros2 launch afi920_driver afi920.launch.py \
     publish_detections:=true \
     publish_health:=true \
     publish_performance:=true \
+    publish_pointcloud_xyzi:=false \
+    xyzi_pad_multiple:=16 \
     validate_e2e:=true \
     e2e_strict:=false \
     config_file:=""

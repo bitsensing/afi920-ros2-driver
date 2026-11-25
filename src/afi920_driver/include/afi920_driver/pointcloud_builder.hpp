@@ -9,11 +9,15 @@
  *   radial_distance_error, azimuth_angle_error, elevation_angle_error,
  *   radial_velocity_error, existence_probability, multi_target_probability,
  *   detection_id, sensor_id, intensity
+ *
+ * XYZI PointCloud2 fields (4, all FLOAT32, 16 bytes/point):
+ *   x, y, z, intensity
  */
 
 #ifndef AFI920_DRIVER__POINTCLOUD_BUILDER_HPP_
 #define AFI920_DRIVER__POINTCLOUD_BUILDER_HPP_
 
+#include <cstdint>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -45,6 +49,16 @@ public:
      */
     sensor_msgs::msg::PointCloud2 build(
         const RdiFrame& frame, const rclcpp::Time& stamp) const;
+
+    /**
+     * @brief Build the 16-byte XYZI cloud (x, y, z, intensity, all FLOAT32) from a cloud made by build().
+     *
+     * The point count is padded up to a multiple of pad_multiple (0 or 1: no padding) with
+     * points at x = y = 0, z = +inf; is_dense is false when padding was added. An input
+     * without points yields an output without points.
+     */
+    static sensor_msgs::msg::PointCloud2 build_xyzi(
+        const sensor_msgs::msg::PointCloud2& full, uint32_t pad_multiple);
 
     /**
      * @brief Build DetectionArray from RDI frame.

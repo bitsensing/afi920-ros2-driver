@@ -4,6 +4,23 @@ All notable changes to the AFI920 ROS 2 Driver will be documented in this file.
 
 ---
 
+## Unreleased
+
+### Isaac ROS Point Cloud Topic
+
+The driver can publish a point cloud that Isaac ROS NITROS point cloud nodes accept. It is off by default, and existing topics, message types and parameters are unchanged.
+
+- **PointCloud2XYZI** — With the new parameter `publish_pointcloud_xyzi` (default `false`), the driver also publishes `<ns>/PointCloud2XYZI`: the points of `PointCloud2` with the fields `x`, `y`, `z`, `intensity` (FLOAT32, 16 B/point), the same header and the same filters. Frames without points are not published on it.
+- **Padding** — The new parameter `xyzi_pad_multiple` (default 16) pads the point count of `PointCloud2XYZI` up to a multiple of its value with points at `x = y = 0`, `z = +inf`; `is_dense` is then `false`. `0` or `1` turns padding off. Isaac ROS 4.1 `PointCloudToFlatScanNode` processes only the first floor(N/16)×16 points.
+- **afi920_isaac.launch.py** — Starts the driver with `PointCloud2XYZI` and the Isaac ROS `PointCloudToFlatScanNode` and `FlatScantoLaserScanNode` (`<ns>/flatscan`, `<ns>/scan`), with `input_qos: SENSOR_DATA` and z bounds of ±1000 m. Isaac ROS is needed at run time only; the package does not depend on it. Verified with Isaac ROS 4.1 on DGX Spark (Ubuntu 24.04, aarch64, Jazzy).
+- **afi920.launch.py, config.yaml, default_params.yaml** — Gain `publish_pointcloud_xyzi` and `xyzi_pad_multiple`.
+
+### Fixes
+
+- **Sensor pose TF on /tf_static** — The mounting pose `parent_frame_id → frame_id` is published on `/tf_static` when the first SPI message arrives and whenever the pose or `frame_id` changes, instead of on `/tf` with every SPI message. The `/tf` transform carried the SPI reception time, up to one SPI period (100 ms) older than the `PointCloud2` stamps, so a transform at a `PointCloud2` stamp failed with an extrapolation error and RViz with Fixed Frame `base_link` alternated between OK and Error.
+
+---
+
 ## v2.2.0
 
 ### Sensor Interface v1.2.0 Compatibility
