@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include <sensor_msgs/msg/point_field.hpp>
@@ -184,6 +185,66 @@ sensor_msgs::msg::PointCloud2 PointCloudBuilder::build(
         ++it_rv; ++it_rcs; ++it_snr;
         ++it_rde; ++it_aze; ++it_ele; ++it_rve;
         ++it_ep; ++it_mtp; ++it_did; ++it_sid; ++it_int;
+    }
+
+    return cloud;
+}
+
+// ─── XYZI PointCloud2 (4 FLOAT32, 16 B/point) ───────────────────────────────
+
+sensor_msgs::msg::PointCloud2 PointCloudBuilder::build_xyzi(
+    const sensor_msgs::msg::PointCloud2& full, uint32_t pad_multiple)
+{
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header = full.header;
+    cloud.height = 1;
+    cloud.is_dense = full.is_dense;
+
+    sensor_msgs::PointCloud2Modifier modifier(cloud);
+    modifier.setPointCloud2Fields(4,
+        "x",         1, sensor_msgs::msg::PointField::FLOAT32,
+        "y",         1, sensor_msgs::msg::PointField::FLOAT32,
+        "z",         1, sensor_msgs::msg::PointField::FLOAT32,
+        "intensity", 1, sensor_msgs::msg::PointField::FLOAT32);
+
+    const size_t n = static_cast<size_t>(full.width) * full.height;
+    if (n == 0) {
+        modifier.resize(0);
+        return cloud;
+    }
+
+    size_t total = n;
+    if (pad_multiple > 1 && n % pad_multiple != 0) {
+        total = n + (pad_multiple - n % pad_multiple);
+        cloud.is_dense = false;
+    }
+    modifier.resize(total);
+
+    sensor_msgs::PointCloud2ConstIterator<float> in_x(full, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> in_y(full, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> in_z(full, "z");
+    sensor_msgs::PointCloud2ConstIterator<float> in_i(full, "intensity");
+    sensor_msgs::PointCloud2Iterator<float> it_x(cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> it_y(cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> it_z(cloud, "z");
+    sensor_msgs::PointCloud2Iterator<float> it_i(cloud, "intensity");
+
+    for (size_t k = 0; k < total; ++k) {
+        if (k < n) {
+            *it_x = *in_x;
+            *it_y = *in_y;
+            *it_z = *in_z;
+            *it_i = *in_i;
+            ++in_x; ++in_y; ++in_z; ++in_i;
+        } else {
+            // Padding point: z = +inf fails any finite z threshold and is non-finite
+            // (invalid) for generic consumers.
+            *it_x = 0.0F;
+            *it_y = 0.0F;
+            *it_z = std::numeric_limits<float>::infinity();
+            *it_i = 0.0F;
+        }
+        ++it_x; ++it_y; ++it_z; ++it_i;
     }
 
     return cloud;

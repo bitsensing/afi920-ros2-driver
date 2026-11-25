@@ -37,6 +37,7 @@ AFI920 센서 데이터를 ROS 2 토픽으로 발행하여 고객 환경의 ROS 
 - [Multi-Sensor](#multi-sensor)
 - [Architecture](#architecture)
 - [RViz2 Visualization](#rviz2-visualization)
+- [Isaac ROS Integration](#isaac-ros-integration)
 - [Troubleshooting](#troubleshooting)
 - [Security Notice](#security-notice)
 - [Related Projects](#related-projects)
@@ -186,6 +187,7 @@ sudo ip addr add 192.168.10.100/24 dev eth0
 | Topic | Type | Rate | 설명 |
 |-------|------|------|------|
 | `PointCloud2` | `sensor_msgs/PointCloud2` | 10 Hz | AFI920 검출 결과를 `sensor_msgs/PointCloud2`로 발행 |
+| `PointCloud2XYZI` | `sensor_msgs/PointCloud2` | 10 Hz | Isaac ROS용 `x`, `y`, `z`, `intensity`(점당 16 B). `publish_pointcloud_xyzi`가 `true`일 때만 발행. [Isaac ROS Integration](#isaac-ros-integration) 참고 |
 | `RDI` | `afi920_msgs/DetectionArray` | 10 Hz | 전체 Detection 데이터 |
 | `SHI` | `afi920_msgs/HealthInfo` | 10 Hz | 센서 상태 및 건강 정보 |
 | `SPI` | `afi920_msgs/SensorPerformance` | 10 Hz | 센서 성능 및 자세 정보 |
@@ -245,6 +247,8 @@ PointCloud2의 Cartesian 좌표 `(x, y, z)`는 sensor frame 기준 **FLU** `(X f
 | `publish_detections` | bool | `true` | No | `RDI` 토픽 발행 여부 |
 | `publish_health` | bool | `true` | No | `SHI` 토픽 발행 여부 |
 | `publish_performance` | bool | `true` | No | `SPI` 토픽 발행 여부 |
+| `publish_pointcloud_xyzi` | bool | `false` | No | `PointCloud2XYZI` 토픽 발행 여부 |
+| `xyzi_pad_multiple` | int | `16` | No | `PointCloud2XYZI` 점 개수를 이 값의 배수로 맞추도록 `z = +inf` 점을 채움 (`0` 또는 `1`: 채우지 않음) |
 
 ### 네트워크 및 설정 파라미터
 
@@ -384,6 +388,27 @@ rviz2 -d $(ros2 pkg prefix afi920_driver)/share/afi920_driver/config/multi_senso
 
 - `intensity`: 반사 강도 기반 시각화
 - `radial_velocity`: 접근/이탈 속도 기반 시각화
+
+---
+
+## Isaac ROS Integration
+
+Isaac ROS NITROS point cloud 노드는 18개 필드로 구성된 `PointCloud2` 구조를 받지 못합니다. `publish_pointcloud_xyzi:=true`로 실행하면 드라이버가 Isaac ROS가 받을 수 있는 `PointCloud2XYZI`를 함께 발행합니다.
+
+| 항목 | `PointCloud2XYZI` |
+|------|-------------------|
+| 필드 | `x`, `y`, `z`, `intensity` (FLOAT32, 점당 16 B) |
+| 점, header, 필터 | `PointCloud2`와 같음 |
+| 빈 프레임 | 발행하지 않음 |
+| 채움 | 점 개수를 `xyzi_pad_multiple`(기본값 16)의 배수로 맞추도록 `x = y = 0`, `z = +inf` 점을 채우며, 이때 `is_dense`는 `false` |
+
+`afi920_isaac.launch.py`는 이 토픽을 켠 드라이버와 Isaac ROS `PointCloudToFlatScanNode`, `FlatScantoLaserScanNode`를 함께 실행하며, `/afi920/flatscan`과 `/afi920/scan`을 발행합니다. Isaac ROS(`isaac_ros_pointcloud_utils`)는 실행 시에만 필요합니다.
+
+```bash
+ros2 launch afi920_driver afi920_isaac.launch.py sensor_ip:=192.168.10.150
+```
+
+DGX Spark(Ubuntu 24.04, aarch64, Jazzy)의 Isaac ROS 4.1에서 검증했습니다. Isaac ROS 입력 조건과 launch 인자는 [AI 통합 가이드](AFI920_ROS2_GUIDE_ko.md#isaac-ros-파이프라인-afi920_isaaclaunchpy)를 참고하세요.
 
 ---
 

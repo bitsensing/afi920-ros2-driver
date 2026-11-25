@@ -532,6 +532,103 @@ TEST_F(PointCloudBuilderTest, MaxDetectionsDoesNotOverflow) {
     EXPECT_LT(16u + 20u + BTS_RDI_MAX_PAYLOAD_SIZE, 512u * 1024u);
 }
 
+// ─── XYZI PointCloud2 Tests ─────────────────────────────────────────────────
+
+static RdiFrame make_multi_detection_frame(size_t count)
+{
+    RdiFrame frame{};
+    frame.message.sensor_id = 1;
+    for (size_t i = 0; i < count; ++i) {
+        frame.detections_storage.push_back(make_detection(
+            10.0f + static_cast<float>(i), 0.01f * static_cast<float>(i), 0.0f,
+            5.0f, 3.0f + static_cast<float>(i), 20.0f));
+    }
+    frame.message.num_detections = static_cast<uint16_t>(count);
+    return frame;
+}
+
+TEST_F(PointCloudBuilderTest, XyziLayout16Bytes)
+{
+    auto full = builder_->build(make_single_detection_frame(10.0f, 0.0f, 0.0f), stamp_);
+    auto xyzi = PointCloudBuilder::build_xyzi(full, 0);
+
+    ASSERT_EQ(xyzi.fields.size(), 4u);
+    EXPECT_EQ(xyzi.fields[0].name, "x");
+    EXPECT_EQ(xyzi.fields[1].name, "y");
+    EXPECT_EQ(xyzi.fields[2].name, "z");
+    EXPECT_EQ(xyzi.fields[3].name, "intensity");
+    for (const auto& f : xyzi.fields) {
+        EXPECT_EQ(f.datatype, sensor_msgs::msg::PointField::FLOAT32);
+    }
+    EXPECT_EQ(xyzi.point_step, 16u);
+    EXPECT_EQ(xyzi.width, 1u);
+    EXPECT_EQ(xyzi.header.frame_id, full.header.frame_id);
+    EXPECT_EQ(xyzi.header.stamp, full.header.stamp);
+    EXPECT_TRUE(xyzi.is_dense);
+}
+
+TEST_F(PointCloudBuilderTest, XyziValuesMatchFullCloud)
+{
+    auto full = builder_->build(make_multi_detection_frame(5), stamp_);
+    auto xyzi = PointCloudBuilder::build_xyzi(full, 0);
+    ASSERT_EQ(xyzi.width, full.width);
+
+    sensor_msgs::PointCloud2ConstIterator<float> fx(full, "x"), fy(full, "y"),
+        fz(full, "z"), fi(full, "intensity");
+    sensor_msgs::PointCloud2ConstIterator<float> ox(xyzi, "x"), oy(xyzi, "y"),
+        oz(xyzi, "z"), oi(xyzi, "intensity");
+    for (uint32_t k = 0; k < full.width; ++k) {
+        EXPECT_FLOAT_EQ(*ox, *fx);
+        EXPECT_FLOAT_EQ(*oy, *fy);
+        EXPECT_FLOAT_EQ(*oz, *fz);
+        EXPECT_FLOAT_EQ(*oi, *fi);
+        ++fx; ++fy; ++fz; ++fi; ++ox; ++oy; ++oz; ++oi;
+    }
+}
+
+TEST_F(PointCloudBuilderTest, XyziPadsToMultipleWithInfZ)
+{
+    auto full = builder_->build(make_multi_detection_frame(17), stamp_);
+    ASSERT_EQ(full.width, 17u);
+    auto xyzi = PointCloudBuilder::build_xyzi(full, 16);
+
+    EXPECT_EQ(xyzi.width, 32u);
+    EXPECT_EQ(xyzi.row_step, 32u * 16u);
+    EXPECT_FALSE(xyzi.is_dense);
+
+    sensor_msgs::PointCloud2ConstIterator<float> oz(xyzi, "z");
+    for (uint32_t k = 0; k < xyzi.width; ++k, ++oz) {
+        if (k < 17) {
+            EXPECT_TRUE(std::isfinite(*oz));
+        } else {
+            EXPECT_TRUE(std::isinf(*oz) && *oz > 0.0f);
+        }
+    }
+}
+
+TEST_F(PointCloudBuilderTest, XyziNoPaddingWhenAlreadyMultiple)
+{
+    auto full = builder_->build(make_multi_detection_frame(16), stamp_);
+    auto xyzi = PointCloudBuilder::build_xyzi(full, 16);
+    EXPECT_EQ(xyzi.width, 16u);
+    EXPECT_TRUE(xyzi.is_dense);
+}
+
+TEST_F(PointCloudBuilderTest, XyziPadMultipleOneOrZeroDisablesPadding)
+{
+    auto full = builder_->build(make_multi_detection_frame(5), stamp_);
+    EXPECT_EQ(PointCloudBuilder::build_xyzi(full, 0).width, 5u);
+    EXPECT_EQ(PointCloudBuilder::build_xyzi(full, 1).width, 5u);
+}
+
+TEST_F(PointCloudBuilderTest, XyziEmptyStaysEmpty)
+{
+    auto full = builder_->build(make_empty_frame(), stamp_);
+    auto xyzi = PointCloudBuilder::build_xyzi(full, 16);
+    EXPECT_EQ(xyzi.width, 0u);
+    EXPECT_EQ(xyzi.fields.size(), 4u);
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);

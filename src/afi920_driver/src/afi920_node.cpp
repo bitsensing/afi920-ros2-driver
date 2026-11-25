@@ -67,6 +67,12 @@ Afi920Node::Afi920Node(const rclcpp::NodeOptions& options)
     // --- Publishers ---
     pub_pointcloud_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
         "PointCloud2", rclcpp::SensorDataQoS());
+    if (publish_pointcloud_xyzi_) {
+        pub_pointcloud_xyzi_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            "PointCloud2XYZI", rclcpp::SensorDataQoS());
+        RCLCPP_INFO(get_logger(), "PointCloud2XYZI enabled (pad to multiple of %u)",
+                    xyzi_pad_multiple_);
+    }
     if (publish_detections_) {
         pub_rdi_ = this->create_publisher<afi920_msgs::msg::DetectionArray>(
             "RDI", rclcpp::SensorDataQoS());
@@ -191,6 +197,8 @@ void Afi920Node::declare_parameters()
     this->declare_parameter<bool>("publish_detections", true);
     this->declare_parameter<bool>("publish_health", true);
     this->declare_parameter<bool>("publish_performance", true);
+    this->declare_parameter<bool>("publish_pointcloud_xyzi", false);
+    this->declare_parameter<int>("xyzi_pad_multiple", 16);
     this->declare_parameter<std::string>("transport_mode", "tcp");
     this->declare_parameter<bool>("validate_e2e", true);
     this->declare_parameter<bool>("e2e_strict", false);
@@ -214,7 +222,10 @@ void Afi920Node::read_parameters()
     publish_detections_         = this->get_parameter("publish_detections").as_bool();
     publish_health_             = this->get_parameter("publish_health").as_bool();
     publish_performance_        = this->get_parameter("publish_performance").as_bool();
-    transport_mode_             = this->get_parameter("transport_mode").as_string();
+    publish_pointcloud_xyzi_    = this->get_parameter("publish_pointcloud_xyzi").as_bool();
+    xyzi_pad_multiple_          = static_cast<uint32_t>(
+        std::max<int64_t>(0, this->get_parameter("xyzi_pad_multiple").as_int()));
+    transport_mode_            = this->get_parameter("transport_mode").as_string();
     validate_e2e_.store(this->get_parameter("validate_e2e").as_bool());
     e2e_strict_.store(this->get_parameter("e2e_strict").as_bool());
 }
@@ -823,6 +834,12 @@ void Afi920Node::on_rdi_frame(const RdiFrame& frame, const E2eVerdict& verdict)
     }
 
     if (publish_cloud) {
+        // Frames without points are not published on PointCloud2XYZI: Isaac ROS
+        // NITROS point cloud consumers terminate on an empty cloud.
+        if (pub_pointcloud_xyzi_ && cloud.width > 0) {
+            pub_pointcloud_xyzi_->publish(
+                PointCloudBuilder::build_xyzi(cloud, xyzi_pad_multiple_));
+        }
         pub_pointcloud_->publish(std::move(cloud));
     }
     if (build_arr) {

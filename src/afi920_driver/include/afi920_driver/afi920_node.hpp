@@ -11,6 +11,8 @@
  *
  * Published topics (all relative, namespace-prefixed):
  *   <ns>/PointCloud2  sensor_msgs/PointCloud2       (18 FLOAT32 fields)
+ *   <ns>/PointCloud2XYZI sensor_msgs/PointCloud2    (x/y/z/intensity, 16 B/point;
+ *                                                    publish_pointcloud_xyzi only)
  *   <ns>/RDI          afi920_msgs/DetectionArray     (full detection data)
  *   <ns>/SHI          afi920_msgs/HealthInfo         (sensor health)
  *   <ns>/SPI          afi920_msgs/SensorPerformance  (sensor performance)
@@ -97,6 +99,8 @@ private:
     std::atomic<bool> publish_detections_{true};
     bool publish_health_;
     bool publish_performance_;
+    bool publish_pointcloud_xyzi_;
+    uint32_t xyzi_pad_multiple_;
     std::string transport_mode_;
     std::atomic<bool> validate_e2e_{true};
     std::atomic<bool> e2e_strict_{false};
@@ -125,6 +129,7 @@ private:
     mutable std::mutex config_mutex_;  // protects pc_builder_ config updates vs SDK reads
 
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_pointcloud_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_pointcloud_xyzi_;
     rclcpp::Publisher<afi920_msgs::msg::DetectionArray>::SharedPtr pub_rdi_;
     rclcpp::Publisher<afi920_msgs::msg::HealthInfo>::SharedPtr pub_shi_;
     rclcpp::Publisher<afi920_msgs::msg::SensorPerformance>::SharedPtr pub_spi_;

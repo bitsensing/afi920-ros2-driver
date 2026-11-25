@@ -37,6 +37,7 @@ It publishes AFI920 sensor data as ROS 2 topics for integration with customer RO
 - [Multi-Sensor](#multi-sensor)
 - [Architecture](#architecture)
 - [RViz2 Visualization](#rviz2-visualization)
+- [Isaac ROS Integration](#isaac-ros-integration)
 - [Troubleshooting](#troubleshooting)
 - [Security Notice](#security-notice)
 - [Related Projects](#related-projects)
@@ -191,6 +192,7 @@ Example: with the default namespace, `PointCloud2` is published as `/afi920/Poin
 | Topic | Type | Rate | Description |
 |-------|------|------|-------------|
 | `PointCloud2` | `sensor_msgs/PointCloud2` | 10 Hz | Publishes AFI920 detections as `sensor_msgs/PointCloud2` |
+| `PointCloud2XYZI` | `sensor_msgs/PointCloud2` | 10 Hz | `x`, `y`, `z`, `intensity` only (16 B/point) for Isaac ROS. Published only when `publish_pointcloud_xyzi` is `true`. See [Isaac ROS Integration](#isaac-ros-integration) |
 | `RDI` | `afi920_msgs/DetectionArray` | 10 Hz | Full detection data |
 | `SHI` | `afi920_msgs/HealthInfo` | 10 Hz | Sensor status and health information |
 | `SPI` | `afi920_msgs/SensorPerformance` | 10 Hz | Sensor performance and pose information |
@@ -250,6 +252,8 @@ This follows the ROS standard coordinate convention defined in [REP-103](https:/
 | `publish_detections` | bool | `true` | No | Enable publishing on the `RDI` topic |
 | `publish_health` | bool | `true` | No | Enable publishing on the `SHI` topic |
 | `publish_performance` | bool | `true` | No | Enable publishing on the `SPI` topic |
+| `publish_pointcloud_xyzi` | bool | `false` | No | Enable publishing on the `PointCloud2XYZI` topic |
+| `xyzi_pad_multiple` | int | `16` | No | Pad `PointCloud2XYZI` to a multiple of this point count with `z = +inf` points (`0` or `1`: no padding) |
 
 ### Network and Configuration Parameters
 
@@ -389,6 +393,27 @@ Color examples:
 
 - `intensity`: Reflectivity-based coloring
 - `radial_velocity`: Approach / recede velocity-based coloring
+
+---
+
+## Isaac ROS Integration
+
+Isaac ROS NITROS point cloud nodes do not accept the 18-field `PointCloud2` layout. With `publish_pointcloud_xyzi:=true` the driver also publishes `PointCloud2XYZI`, which Isaac ROS accepts:
+
+| Item | `PointCloud2XYZI` |
+|------|-------------------|
+| Fields | `x`, `y`, `z`, `intensity` (FLOAT32, 16 B/point) |
+| Points, header, filters | Same as `PointCloud2` |
+| Empty frames | Not published |
+| Padding | Point count padded to a multiple of `xyzi_pad_multiple` (default 16) with `x = y = 0`, `z = +inf` points; `is_dense` is then `false` |
+
+`afi920_isaac.launch.py` starts the driver with this topic and the Isaac ROS `PointCloudToFlatScanNode` and `FlatScantoLaserScanNode`, publishing `/afi920/flatscan` and `/afi920/scan`. Isaac ROS (`isaac_ros_pointcloud_utils`) is needed at run time only.
+
+```bash
+ros2 launch afi920_driver afi920_isaac.launch.py sensor_ip:=192.168.10.150
+```
+
+Verified with Isaac ROS 4.1 on DGX Spark (Ubuntu 24.04, aarch64, Jazzy). The Isaac ROS input conditions and the launch arguments are listed in the [AI Integration Guide](AFI920_ROS2_GUIDE.md#isaac-ros-pipeline-afi920_isaaclaunchpy).
 
 ---
 
